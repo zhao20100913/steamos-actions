@@ -18,9 +18,22 @@ AUDIOREACH_COMMIT=2af1f1ebb8d4fd03b5f53891467ddde2e208a8a0
 [[ -f "$DEV/tools/build-liuqin-audio-topology.sh" ]] || die "检出里没有 build-liuqin-audio-topology.sh"
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-log "克隆 audioreach-topology（固定 commit）..."
-git clone --depth 1 https://github.com/linux-msm/audioreach-topology.git "$TMP/topology" || die "克隆失败"
-( cd "$TMP/topology" && git fetch --depth 1 origin "$AUDIOREACH_COMMIT" && git checkout --detach "$AUDIOREACH_COMMIT" ) || true
+log "克隆 audioreach-topology（固定 commit，最多 3 次重试）..."
+ok=0
+for attempt in 1 2 3; do
+  rm -rf "$TMP/topology"
+  if git clone --depth 1 https://github.com/linux-msm/audioreach-topology.git "$TMP/topology"; then
+    ( cd "$TMP/topology" && git fetch --depth 1 origin "$AUDIOREACH_COMMIT" && git checkout --detach "$AUDIOREACH_COMMIT" ) || true
+    ok=1
+    break
+  fi
+  echo "[33] 第 ${attempt} 次克隆失败（网络/DNS 暂时不可用），5 秒后重试" >&2
+  sleep 5
+done
+if [[ "$ok" != 1 ]]; then
+  log "克隆失败（网络问题）——跳过拓扑重建，沿用固定闭包 tplg（liuqin-audio 包将跳过）"
+  exit 0
+fi
 
 mkdir -p "$AUDIO_PKG/src"
 AUDIOREACH_TOPOLOGY_DIR="$TMP/topology" \
