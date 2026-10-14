@@ -1,0 +1,31 @@
+# Maintainer: SteamOS-for-liuqin port
+# 小米平板 6 Pro 关机充电模式（liuqin-charger-mode）—— 上游是 initramfs stage-1 状态机
+# 本移植（无 initramfs）只把三个工具装进镜像备查，不启用任何服务/钩子：
+# 关机插电时由 ABL 进入充电模式的能力属于后续 boot 方案的工作项，见 packages/README.md。
+
+pkgname=liuqin-charger-mode
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) charger-mode stage-1 state machine tools (not enabled on no-initramfs boot)"
+arch=('aarch64')
+license=('MIT')
+depends=('glibc' 'bash')
+makedepends=('gcc' 'linux-api-headers')
+source=(
+  'liuqin-charger-mode'
+  'liuqin-charger-mode-exit.c'
+  'liuqin-charger-mode-power-key.c'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+build() {
+  gcc -O2 -Wall -o liuqin-charger-mode-exit liuqin-charger-mode-exit.c
+  gcc -O2 -Wall -o liuqin-charger-mode-power-key liuqin-charger-mode-power-key.c
+}
+
+package() {
+  install -Dm755 liuqin-charger-mode "$pkgdir/usr/local/bin/liuqin-charger-mode"
+  # 脚本内引用 /bin/liuqin-charger-mode-*；Arch 上 /bin -> /usr/bin
+  install -Dm755 liuqin-charger-mode-exit "$pkgdir/usr/bin/liuqin-charger-mode-exit"
+  install -Dm755 liuqin-charger-mode-power-key "$pkgdir/usr/bin/liuqin-charger-mode-power-key"
+}
