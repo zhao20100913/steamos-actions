@@ -18,6 +18,7 @@
 #   CMDLINE / HEADER_CMDLINE / ABL_DTB02_IDS / STOCK_OVERLAY_DIR / STOCK_BASE_DIR ...
 set -euo pipefail
 log()  { printf '[%s] %s\n' "${0##*/}" "$*"; }
+warn() { printf '[%s] 警告: %s\n' "${0##*/}" "$*" >&2; }
 die()  { printf '[%s] 错误: %s\n' "${0##*/}" "$*" >&2; exit 1; }
 
 WORK="${WORK:-$PWD/work}"
@@ -59,11 +60,39 @@ for f in "$IMAGE" "$DTB_RAW" "$DTC" "$FDTOVERLAY"; do
 done
 
 # 1) mkbootimg（AOSP 固定 commit，与上游 liuqin 项目一致）
+#    2026-10 起 googlesource 官方源不稳定（504 / 内容校验失败），失败时自动改从
+#    GitHub 镜像 KleeUI/android_system_tools_mkbootimg（master，内容即 AOSP
+#    android-16.0.0_r4）取两个文件，并用上游锁定哈希逐字节校验。
 MKBOOTIMG_DIR="$WORK/aosp-mkbootimg"
-if [[ ! -x "$MKBOOTIMG_DIR/mkbootimg.py" ]]; then
-  ( cd "$XIAOMI" && sh tools/fetch-aosp-mkbootimg.sh ) \
-    || die "fetch-aosp-mkbootimg.sh 失败"
-  cp -a "$XIAOMI/tools/local/aosp-mkbootimg" "$MKBOOTIMG_DIR"
+MKBOOTIMG_PIN_MKBOOTIMG="37d84b3d162e0bc62e36c1f4e1c63c85ea0caa9f29be023eb2f8efe006ad948c"
+MKBOOTIMG_PIN_UNPACK="06b54dd9a07c5281778e29e234e76f6e3faee8bf0c904a5ef88fdee30eeed12e"
+if [[ ! -r "$MKBOOTIMG_DIR/mkbootimg.py" || ! -r "$MKBOOTIMG_DIR/unpack_bootimg.py" ]]; then
+  rm -rf "$MKBOOTIMG_DIR"; mkdir -p "$MKBOOTIMG_DIR"
+  if ( cd "$XIAOMI" && sh tools/fetch-aosp-mkbootimg.sh ); then
+    cp -a "$XIAOMI/tools/local/aosp-mkbootimg/." "$MKBOOTIMG_DIR/"
+    log "mkbootimg：googlesource 官方源获取成功"
+  else
+    log "googlesource 官方源不可用，改用 GitHub 镜像（双文件哈希锁定）..."
+    for pair in "mkbootimg.py:$MKBOOTIMG_PIN_MKBOOTIMG" "unpack_bootimg.py:$MKBOOTIMG_PIN_UNPACK"; do
+      fname="${pair%%:*}"; pin="${pair##*:}"
+      for attempt in 1 2 3; do
+        if curl -fsSL --max-time 60 \
+             "https://raw.githubusercontent.com/KleeUI/android_system_tools_mkbootimg/master/$fname" \
+             -o "$MKBOOTIMG_DIR/$fname"; then
+          break
+        fi
+        log "第 $attempt 次下载 $fname 失败，5 秒后重试"
+        sleep 5
+      done
+      [[ -r "$MKBOOTIMG_DIR/$fname" ]] || die "下载 $fname 失败"
+      echo "$pin  $MKBOOTIMG_DIR/$fname" | sha256sum --check --status \
+        || die "$fname 校验失败（期望 $pin）"
+      chmod +x "$MKBOOTIMG_DIR/$fname"
+      log "已校验: $fname = $pin"
+    done
+  fi
+  [[ -r "$MKBOOTIMG_DIR/mkbootimg.py" ]] || die "mkbootimg.py 缺失"
+  [[ -r "$MKBOOTIMG_DIR/unpack_bootimg.py" ]] || die "unpack_bootimg.py 缺失"
 fi
 
 # 2) stock inputs（boot.img 被 ABL 接受的硬前提）

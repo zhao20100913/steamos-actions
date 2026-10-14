@@ -25,10 +25,20 @@ curl -fsSL --retry 3 "$ALARM_MIRROR" -o "$TMP/alarm.tar.gz" || die "ALARM 下载
 sudo tar -xzf "$TMP/alarm.tar.gz" -C "$MNT" || die "ALARM 解包失败"
 
 # 网络与伪文件系统
-# GitHub 托管 runner 偶发对部分域名（如 mirror.archlinuxarm.org）解析失败：
-# 显式写入公共解析器 + pacman 同步/安装带重试（见下方 chroot 脚本）。
+# GitHub 托管 runner 偶发 chroot 内 DNS 整体失效（连公共解析器也不通，但 host 侧
+# 解析正常——tarball 能下载）。对策：在 host 上解析镜像 IP 并写入 chroot
+# /etc/hosts，让 pacman 完全绕开 DNS；同时显式写公共解析器作第二通道。
 sudo cp /etc/resolv.conf "$MNT/etc/resolv.conf" 2>/dev/null || true
 printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 223.5.5.5\n' | sudo tee "$MNT/etc/resolv.conf" >/dev/null
+for _h in fl.us.mirror.archlinuxarm.org mirrors.tuna.tsinghua.edu.cn mirrors.ustc.edu.cn; do
+  _ip="$(getent ahostsv4 "$_h" 2>/dev/null | awk 'NR==1{print $1}')"
+  if [[ -n "$_ip" ]]; then
+    echo "$_ip $_h" | sudo tee -a "$MNT/etc/hosts" >/dev/null
+    log "hosts 固定: $_ip $_h"
+  else
+    log "警告: host 侧也解析不到 $_h，保留 DNS 路径"
+  fi
+done
 sudo mount --bind /dev "$MNT/dev"
 sudo mount --bind /dev/pts "$MNT/dev/pts"
 sudo mount -t proc proc "$MNT/proc"
