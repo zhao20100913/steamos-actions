@@ -1,0 +1,20 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-audio —— 四扬声器 CS35L41 的 ALSA UCM2 配置
+# 音频拓扑 tplg 随 liuqin-firmware 安装（/usr/lib/firmware/qcom/sm8475/Xiaomi-Pad-6-Pro-tplg.bin）。
+# ⚠️ 扬声器 Halo 保护校准尚未写入（docs/AUDIO_SENSORS_PLAN 5.5），UCM 默认全静音，
+#    校准落地前不要放开音量 —— 否则可能烧扬声器。首次出声用项目的 tools/liuqin-audio-first-sound.sh。
+
+pkgname=liuqin-audio
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) ALSA UCM2 profile for quad CS35L41 (muted until calibration)"
+arch=('aarch64')
+license=('MIT')
+depends=('alsa-lib')
+source=('ucm2/')
+noextract=('ucm2')
+sha256sums=('SKIP')
+
+package() {
+  cp -a ucm2/. "$pkgdir/usr/share/alsa/ucm2/"
+}
