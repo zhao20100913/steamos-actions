@@ -1,0 +1,27 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-mipps-auth —— Xiaomi MiPPS/PPS 充电器与电量计认证（Python，派生自 ianchb/xiaomi-mipps-auth）
+# 服务由 90-liuqin-mipps-auth.rules 的 SYSTEMD_WANTS / RUN 在 USB-C partner 出现时拉起，不 enable。
+
+pkgname=liuqin-mipps-auth
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) MiPPS/PPS charger and fuel-gauge authentication"
+arch=('aarch64')
+license=('GPL-2.0-only')
+depends=('python' 'systemd' 'flock')
+source=(
+  'liuqin-mipps-auth'
+  'liuqin-mipps-auth.service'
+  '10-allow-unverified-adapter.conf'
+  '90-liuqin-mipps-auth.rules'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 liuqin-mipps-auth "$pkgdir/usr/local/libexec/liuqin-mipps-auth"
+  install -Dm644 liuqin-mipps-auth.service "$pkgdir/usr/lib/systemd/system/liuqin-mipps-auth.service"
+  install -Dm644 10-allow-unverified-adapter.conf \
+    "$pkgdir/usr/lib/systemd/system/liuqin-mipps-auth.service.d/10-allow-unverified-adapter.conf"
+  install -Dm644 90-liuqin-mipps-auth.rules \
+    "$pkgdir/usr/lib/udev/rules.d/90-liuqin-mipps-auth.rules"
+}
