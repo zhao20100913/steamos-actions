@@ -1,0 +1,23 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-firmware —— 完整固定固件闭包（197 个文件，firmware.manifest 锁定 OS2.0.6.0 基线）
+# 内容：SM8475 DSP（adsp/cdsp/slpi）、WCN6855 WLAN（含项目生成的 board-2.bin.zst）、
+#       QCA6490 BT（hpnv20/hpbtfw）、Novatek NT36532 触屏、Adreno 730 GPU、
+#       CS35L41/CS35L63 音频 DSP、音频拓扑 tplg、VPU、regdb。
+# 来源：xiaomipad-6pro-mainline/device/firmware（31-vendor-device-sources.sh 拷入 src/firmware）。
+# 注意：per-device 数据（WLAN MAC/BT 地址/扬声器校准/传感器 registry）不在此包，见 README。
+# 二进制归属 Qualcomm/Xiaomi/Cirrus 及其许可方，仅限本机拥有者使用，见上游 NOTICE。
+
+pkgname=liuqin-firmware
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) pinned board firmware closure"
+arch=('aarch64')
+license=('LicenseRef-Qualcomm' 'LicenseRef-Xiaomi' 'LicenseRef-CirrusLogic')
+source=('firmware/')
+noextract=('firmware')
+sha256sums=('SKIP')
+
+package() {
+  cp -a firmware/. "$pkgdir/usr/lib/firmware/"
+  install -Dm644 firmware.manifest "$pkgdir/usr/share/doc/liuqin-firmware/firmware.manifest"
+}
