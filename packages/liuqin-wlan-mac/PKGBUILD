@@ -1,0 +1,25 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-wlan-mac —— 在 NetworkManager 之前写入本机出厂 WLAN 身份
+# 状态文件 /var/lib/liuqin-private/wlan-mac 是 per-device 数据（从本机 persist 提取，不可分发）。
+# graft 会给服务加 ConditionPathExists，未预配时跳过（不阻塞 NetworkManager）。
+
+pkgname=liuqin-wlan-mac
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) factory WLAN MAC identity provisioner"
+arch=('aarch64')
+license=('MIT')
+depends=('bash' 'iproute2' 'systemd')
+source=(
+  'liuqin-wlan-mac'
+  'liuqin-wlan-mac.service'
+  '20-liuqin-wlan-mac.conf'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 liuqin-wlan-mac "$pkgdir/usr/local/sbin/liuqin-wlan-mac"
+  install -Dm644 liuqin-wlan-mac.service "$pkgdir/usr/lib/systemd/system/liuqin-wlan-mac.service"
+  install -Dm644 20-liuqin-wlan-mac.conf \
+    "$pkgdir/usr/lib/systemd/system/NetworkManager.service.d/20-liuqin-wlan-mac.conf"
+}
