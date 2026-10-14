@@ -1,0 +1,23 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-uinput-automation —— 通过 /dev/uinput 造原生分辨率（1800x2880）输入设备的自动化工具
+# 开发/调试用，不启用服务。
+
+pkgname=liuqin-uinput-automation
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) uinput automation helper (native-resolution virtual input)"
+arch=('aarch64')
+license=('MIT')
+depends=('glibc')
+makedepends=('gcc' 'linux-api-headers')
+source=('liuqin-uinput-automation.c')
+sha256sums=('SKIP')
+
+build() {
+  gcc -O2 -Wall -o liuqin-uinput-automation liuqin-uinput-automation.c
+}
+
+package() {
+  # 与 xiaomipad 项目 build-liuqin-debs.sh 的落点一致
+  install -Dm755 liuqin-uinput-automation "$pkgdir/usr/local/libexec/liuqin-uinput-automation"
+}
