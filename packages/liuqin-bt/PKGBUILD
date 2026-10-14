@@ -1,0 +1,25 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-bt —— 给 QCA6490 提交出厂蓝牙地址（BlueZ 才能发布 adapter）
+# 状态文件 /var/lib/liuqin-private/bluetooth-address 是 per-device 数据（从本机 persist 提取）。
+# graft 会给服务加 ConditionPathExists，未预配时跳过（不阻塞 bluetooth.service）。
+
+pkgname=liuqin-bt
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) factory Bluetooth address provisioner"
+arch=('aarch64')
+license=('MIT')
+depends=('bash' 'bluez' 'systemd')
+source=(
+  'liuqin-bt-public-addr'
+  'liuqin-bt-preconfigure.service'
+  '20-liuqin-public-address.conf'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -Dm755 liuqin-bt-public-addr "$pkgdir/usr/local/sbin/liuqin-bt-public-addr"
+  install -Dm644 liuqin-bt-preconfigure.service "$pkgdir/usr/lib/systemd/system/liuqin-bt-preconfigure.service"
+  install -Dm644 20-liuqin-public-address.conf \
+    "$pkgdir/usr/lib/systemd/system/bluetooth.service.d/20-liuqin-public-address.conf"
+}
