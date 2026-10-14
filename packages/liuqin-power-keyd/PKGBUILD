@@ -1,0 +1,39 @@
+# Maintainer: SteamOS-for-liuqin port
+# 小米平板 6 Pro 电源键守护进程（liuqin-power-keyd）
+# 源码与单元定义来自 xiaomipad-6pro-mainline（MIT），由 scripts/host/31-vendor-device-sources.sh 拷入 src/
+# 注意：GNOME 专用的 20-liuqin-session-runtime.conf（ReadOnlyPaths=/home）不随包安装 ——
+# SteamOS 桌面 /home 需要可写（Steam 要写用户目录）。
+
+pkgname=liuqin-power-keyd
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) power key daemon and desktop power actions"
+arch=('aarch64')
+license=('MIT')
+depends=('glibc' 'systemd' 'polkit')
+makedepends=('gcc' 'linux-api-headers')
+source=(
+  'liuqin-power-keyd.c'
+  'liuqin-power-keyd.service'
+  'liuqin-power-key-action'
+  'liuqin-power-menu'
+  'io.github.liuqin.power.gschema.xml'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+build() {
+  gcc -O2 -Wall -o liuqin-power-keyd liuqin-power-keyd.c
+}
+
+package() {
+  install -Dm755 liuqin-power-keyd "$pkgdir/usr/local/libexec/liuqin-power-keyd"
+  install -Dm755 liuqin-power-key-action "$pkgdir/usr/local/libexec/liuqin-power-key-action"
+  install -Dm755 liuqin-power-menu "$pkgdir/usr/local/libexec/liuqin-power-menu"
+  install -Dm644 liuqin-power-keyd.service "$pkgdir/usr/lib/systemd/system/liuqin-power-keyd.service"
+  # GSettings schema：标准目录（gsettings 生效）+ 原项目目录（脚本 LIUQIN_POWER_SCHEMA_DIR 兜底）
+  install -Dm644 io.github.liuqin.power.gschema.xml \
+    "$pkgdir/usr/share/glib-2.0/schemas/io.github.liuqin.power.gschema.xml"
+  install -Dm644 io.github.liuqin.power.gschema.xml \
+    "$pkgdir/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml"
+  # 电源菜单依赖 zenity（KDE 桌面没有）；装包后由 graft 尽力 pacman -S zenity
+}
