@@ -92,7 +92,7 @@ sudo chroot "$MNT" /bin/bash -c "
   ok=0
   for attempt in 1 2 3; do
     echo '[20] 第 '\$attempt'/3 次尝试同步仓库...'
-    if pacman -Sy --noconfirm && pacman -S --noconfirm --needed base-devel git rsync cpio gcc; then
+    if pacman -Sy --noconfirm && pacman -S --noconfirm --needed base-devel git rsync cpio gcc alsa-lib bluez python flock polkit iproute2 linux-api-headers; then
       ok=1
       break
     fi
