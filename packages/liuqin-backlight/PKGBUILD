@@ -1,0 +1,21 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-backlight —— 进桌面前把 ktz8866 背光设为默认值（并拒绝充电模式的误开屏）
+
+pkgname=liuqin-backlight
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) default backlight setter (ktz8866)"
+arch=('aarch64')
+license=('MIT')
+depends=('bash' 'systemd')
+source=(
+  'liuqin-backlight-default'
+  'liuqin-backlight-default.service'
+)
+sha256sums=('SKIP' 'SKIP')
+
+package() {
+  install -Dm755 liuqin-backlight-default "$pkgdir/usr/local/libexec/liuqin-backlight-default"
+  install -Dm644 liuqin-backlight-default.service \
+    "$pkgdir/usr/lib/systemd/system/liuqin-backlight-default.service"
+}
