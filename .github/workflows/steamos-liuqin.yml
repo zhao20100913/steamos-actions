@@ -1,0 +1,332 @@
+name: Build SteamOS for liuqin (Steam Frame base)
+
+# 为小米平板 6 Pro（liuqin, SM8475）构建可 fastboot 刷入的 SteamOS：
+#   · 底包：Valve Steam Frame 官方恢复镜像（SteamOS holo / aarch64）
+#   · 内核：linux-sm8450-liuqin（liuqin-6.17）+ xiaomipad-6pro-mainline 配置片段
+#   · 设备层：xiaomipad-6pro-mainline 的 liuqin 设备源码重打包为 Arch 包
+#   · 流水线结构参考 code002-2/Steamos-xiaomi-sheng（已在平板 6S Pro 实机跑通）
+#
+# ⚠️ 前置条件（缺了 boot.img 无法被小米 ABL 接受）：
+#   在 workflow_dispatch 里提供 stock_inputs_url —— 从<b>本机</b>原厂固件提取的
+#   analysis 产物 tar.gz（dtbo 44 个条目 + vendor_boot 的 14 个 dtb），
+#   生产方法见仓库 README「准备 stock inputs」一节。
+
+on:
+  workflow_dispatch:
+    inputs:
+      frame_image_url:
+        description: 'Steam Frame 官方恢复镜像（底包）'
+        required: true
+        type: string
+        default: 'https://steamdeck-images.steamos.cloud/recovery/steamframe-repair-latest.img.bz2'
+      boot_mode:
+        description: 'single (userdata)=单系统，先做这个；dual (linux_root)=保留 Android 的双系统布局（原项目双系统切换未全量验证）'
+        required: true
+        type: choice
+        default: 'single (userdata)'
+        options:
+          - 'single (userdata)'
+          - 'dual (linux_root)'
+      rootfs_size:
+        description: 'rootfs.img 初始大小下限（脚本按底包实际用量自动放大）'
+        required: false
+        type: string
+        default: '14G'
+      shrink_image:
+        description: '构建后收缩镜像（e2fsck + resize2fs -M）'
+        required: false
+        type: boolean
+        default: true
+      kernel_commit:
+        description: 'liuqin 内核固定 commit（留空 = 分支 liuqin-6.17 最新）'
+        required: false
+        type: string
+        default: ''
+      stock_inputs_url:
+        description: '必填：本机原厂固件 analysis 产物 tar.gz（dtbo + vendor_boot/dtbs），ABL 接受 boot.img 的前提'
+        required: false
+        type: string
+        default: ''
+      firmware_inputs_url:
+        description: '可选：你自己的原厂 qca6490 目录 tar.gz（仅用于按你的 ROM 重新生成 WCN6855 board-2.bin.zst；留空用项目固定闭包）'
+        required: false
+        type: string
+        default: ''
+      build_audio_topology:
+        description: '构建扬声器 AudioReach 拓扑并打包（需要联网克隆 audioreach-topology）'
+        required: false
+        type: boolean
+        default: true
+      upload_artifacts:
+        description: '上传 rootfs.img / boot.img（关掉只做构建校验）'
+        required: false
+        type: boolean
+        default: true
+      wifi_ssid:
+        description: '开机自动连接的 WiFi 名称（留空则不预配）'
+        required: false
+        type: string
+        default: ''
+      wifi_password:
+        description: 'WiFi 密码（仅作为构建输入，不写入仓库）'
+        required: false
+        type: string
+        default: ''
+      ssh_pubkey:
+        description: '写入 root 的 authorized_keys 的 SSH 公钥（最稳的登录入口）'
+        required: false
+        type: string
+        default: ''
+      root_password:
+        description: 'root 密码（SSH 用；留空则不设置）'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1) 内核 + boot.img（x86_64 交叉编译）
+  #    liuqin 的 boot.img 必须能被小米 ABL 接受：header v2 + 空 cmdline（内核读
+  #    /chosen/bootargs）+ __symbols__ sink + 板级身份，见 06-make-liuqin-bootimg.sh
+  # ---------------------------------------------------------------------------
+  kernel:
+    name: Build liuqin kernel + boot.img
+    runs-on: ubuntu-24.04
+    timeout-minutes: 420
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install host tools (cross build)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu \
+            python3 git ccache kmod rsync cpio device-tree-compiler
+
+      - name: Build kernel + modules
+        run: |
+          bash scripts/host/07-build-liuqin-kernel.sh \
+            --work "$RUNNER_TEMP/liuqin" --jobs "$(nproc)" \
+            ${KERNEL_COMMIT:+--commit "$KERNEL_COMMIT"}
+        env:
+          KERNEL_COMMIT: ${{ inputs.kernel_commit }}
+
+      - name: Build boot.img (ABL-compatible)
+        run: |
+          bash scripts/host/06-make-liuqin-bootimg.sh \
+            --work "$RUNNER_TEMP/liuqin" \
+            --kernel-out "$RUNNER_TEMP/liuqin/out/kernel" \
+            --boot-mode "${{ inputs.boot_mode }}" \
+            ${STOCK_INPUTS_URL:+--stock-inputs-url "$STOCK_INPUTS_URL"}
+        env:
+          STOCK_INPUTS_URL: ${{ inputs.stock_inputs_url }}
+
+      - name: Upload kernel modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-kernel-modules
+          path: ${{ runner.temp }}/liuqin/out/kernel-modules.tar.gz
+          retention-days: 14
+          compression-level: 1
+          if-no-files-found: error
+
+      - name: Upload boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-boot
+          path: ${{ runner.temp }}/liuqin/out/boot-liuqin-steamos.img
+          retention-days: 14
+          compression-level: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2) Arch 设备包（arm64 原生 runner + ALARM chroot + makepkg）
+  #    v1 只打包自包含的 C 助手；WLAN 固件/音频拓扑按输入可选参与；
+  #    传感器栈、指纹栈见 packages/README.md（需另行重打包）
+  # ---------------------------------------------------------------------------
+  packages:
+    name: Build Arch device packages
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Clone liuqin device sources
+        run: |
+          git clone --depth 1 https://github.com/yzddmr6/xiaomipad-6pro-mainline.git "$RUNNER_TEMP/liuqin-device"
+
+      - name: Vendor device sources into packages
+        run: |
+          bash scripts/host/31-vendor-device-sources.sh "$RUNNER_TEMP/liuqin-device"
+
+      - name: Prepare WLAN firmware (optional)
+        if: ${{ inputs.firmware_inputs_url != '' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/wlan-vendor"
+          curl -fsSL --retry 3 "${{ inputs.firmware_inputs_url }}" -o "$RUNNER_TEMP/wlan-vendor/vendor.tar.gz"
+          tar -xzf "$RUNNER_TEMP/wlan-vendor/vendor.tar.gz" -C "$RUNNER_TEMP/wlan-vendor"
+          bash scripts/host/32-prepare-wlan-firmware.sh "$RUNNER_TEMP/liuqin-device" "$RUNNER_TEMP/wlan-vendor" || \
+            { echo "::warning::WLAN 固件重新生成失败，保持项目固定闭包"; }
+
+      - name: Prepare audio topology (optional)
+        if: ${{ inputs.build_audio_topology }}
+        run: |
+          bash scripts/host/33-prepare-audio-topology.sh "$RUNNER_TEMP/liuqin-device" || \
+            { echo "::warning::音频拓扑构建失败，跳过 liuqin-audio 包"; }
+
+      - name: Prepare ALARM chroot
+        run: |
+          sudo bash scripts/host/20-alarm-chroot.sh /mnt/alarm
+
+      - name: Build packages
+        run: |
+          sudo bash scripts/host/21-build-pkg.sh /mnt/alarm packages pkgs
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-pkgs
+          path: pkgs
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3) 组装 rootfs.img（Frame 用户空间 + liuqin 内核模块 + 设备包）
+  # ---------------------------------------------------------------------------
+  assemble:
+    name: Assemble SteamOS-for-liuqin RootFS
+    needs: [kernel, packages]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      ROOTFS_MOUNT: /mnt/rootfs
+      WORK: /mnt/frame-work
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Parse boot mode -> PARTLABEL
+        id: parse
+        run: |
+          case "${{ inputs.boot_mode }}" in
+            "single (userdata)") LABEL="userdata" ;;
+            "dual (linux_root)") LABEL="linux_root" ;;
+            *) echo "::error::未知 boot_mode"; exit 1 ;;
+          esac
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Download kernel modules + boot + packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'liuqin-*'
+          path: inputs
+          merge-multiple: true
+
+      - name: Free disk space (Frame 底包 ~5GB 与目标镜像需同时存在)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost \
+                      "$AGENT_TOOLSDIRECTORY/CodeQL" 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          df -h / | tail -1
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl bzip2 zstd xz-utils e2fsprogs rsync util-linux \
+            p7zip-full btrfs-progs cpio
+
+      - name: Fetch Frame base (download -> GPT 解析 -> 切出 rootfs 分区)
+        run: |
+          sudo env FRAME_IMAGE_URL="${{ inputs.frame_image_url }}" WORK="$WORK" OUT="$WORK/out" \
+            bash scripts/host/00-fetch-frame-rootfs.sh
+
+      - name: Lay Frame userspace into our ext4 image
+        run: |
+          sudo bash scripts/host/01-lay-rootfs.sh "$WORK/out/rootfs.frame" rootfs.img "${{ inputs.rootfs_size }}"
+
+      - name: Mount chroot & inject liuqin device layer
+        run: |
+          set -euo pipefail
+          sudo mkdir -p "$ROOTFS_MOUNT"
+          sudo mount -o loop rootfs.img "$ROOTFS_MOUNT"
+          for d in dev dev/pts proc sys tmp; do sudo mkdir -p "$ROOTFS_MOUNT/$d"; done
+          sudo mount --bind /dev "$ROOTFS_MOUNT/dev"
+          sudo mount --bind /dev/pts "$ROOTFS_MOUNT/dev/pts"
+          sudo mount -t proc proc "$ROOTFS_MOUNT/proc"
+          sudo mount -t sysfs sysfs "$ROOTFS_MOUNT/sys"
+          # Frame 的 resolv.conf 是悬空软链，chroot 内无 DNS 则 pacman 补依赖失败
+          sudo rm -f "$ROOTFS_MOUNT/etc/resolv.conf"
+          sudo cp /etc/resolv.conf "$ROOTFS_MOUNT/etc/resolv.conf" 2>/dev/null || \
+            printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' | sudo tee "$ROOTFS_MOUNT/etc/resolv.conf" >/dev/null
+          sudo mkdir -p "$ROOTFS_MOUNT/tmp/pkgs" "$ROOTFS_MOUNT/root/graft"
+          sudo cp -a inputs/. "$ROOTFS_MOUNT/tmp/pkgs/" 2>/dev/null || true
+          # 区分设备包与内核模块包：把 .pkg.tar.* 之外的（tar.gz / img）挪出来
+          sudo find "$ROOTFS_MOUNT/tmp/pkgs" -maxdepth 1 -type f -name '*.tar.gz' \
+            -exec mv {} "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" \;
+          sudo find "$ROOTFS_MOUNT/tmp/pkgs" -maxdepth 1 -type f -name '*.img' \
+            -exec mv {} "$ROOTFS_MOUNT/tmp/boot.img" \;
+          sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
+          sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
+          sudo chroot "$ROOTFS_MOUNT" /bin/bash -c \
+            "PARTLABEL='${{ steps.parse.outputs.label }}' \
+             WIFI_SSID='${{ inputs.wifi_ssid }}' WIFI_PSK='${{ inputs.wifi_password }}' \
+             ROOT_PW='${{ inputs.root_password }}' SSH_PUBKEY='${{ inputs.ssh_pubkey }}' \
+             KERNEL_MODULES_TAR='/tmp/kernel-modules.tar.gz' \
+             bash /root/graft/10-graft-liuqin.sh"
+
+      - name: Unmount & finalize image
+        if: always()
+        run: |
+          sudo env SHRINK_IMAGE="${{ inputs.shrink_image }}" \
+            bash scripts/host/03-finalize-image.sh rootfs.img "$ROOTFS_MOUNT"
+
+      - name: Verify kernel/module version match
+        run: |
+          mv -f "$ROOTFS_MOUNT/tmp/boot.img" boot.img 2>/dev/null || \
+            mv -f inputs/boot-liuqin-steamos.img boot.img
+          bash scripts/host/04-verify-kernel-match.sh boot.img rootfs.img
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## SteamOS for liuqin 构建结果"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 底包 | Steam Frame 官方镜像 |"
+            echo "| 分区（PARTLABEL） | ${{ steps.parse.outputs.label }} |"
+            echo "| boot.img | $(du -h boot.img 2>/dev/null | cut -f1 || echo N/A) |"
+            echo "| rootfs.img | $(du -h rootfs.img 2>/dev/null | cut -f1 || echo N/A) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload RootFS Image
+        if: ${{ inputs.upload_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: steamos-liuqin-rootfs-${{ steps.parse.outputs.label }}
+          path: rootfs.img
+          retention-days: 14
+          compression-level: 1
+          if-no-files-found: error
+
+      - name: Upload Boot Image
+        if: ${{ inputs.upload_artifacts }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: steamos-liuqin-boot-${{ steps.parse.outputs.label }}
+          path: boot.img
+          retention-days: 14
+          compression-level: 1
+          if-no-files-found: error
