@@ -42,7 +42,39 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "pacman-key 初始化 + 更新仓库 + 安装 base-devel（最多 3 次重试）..."
+log "pacman-key 初始化 + 更新仓库 + 安装 base-devel（多镜像，最多 3 次重试）..."
+# 2026-10 实测：官方 mirror.archlinuxarm.org 返回 502 / DNS 不稳定（GitHub runner 上直接
+# "Could not resolve host"）。改用实测可用的镜像列表（pacman 会按 Server 顺序自动切换）：
+#   https://fl.us.mirror.archlinuxarm.org          （官方美国镜像，200）
+#   https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm （清华，200）
+#   https://mirrors.ustc.edu.cn/archlinuxarm          （中科大，200）
+sudo tee "$MNT/etc/pacman.conf" >/dev/null <<'EOF'
+[options]
+HoldPkg     = pacman glibc
+Architecture = aarch64
+SigLevel    = Required DatabaseOptional
+LocalFileSigLevel = Optional
+
+[core]
+Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo
+
+[extra]
+Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo
+
+[alarm]
+Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo
+
+[aur]
+Server = https://fl.us.mirror.archlinuxarm.org/$arch/$repo
+Server = https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/$arch/$repo
+Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo
+EOF
 sudo chroot "$MNT" /bin/bash -c "
   set -e
   pacman-key --init
