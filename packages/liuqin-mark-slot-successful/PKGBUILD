@@ -1,0 +1,23 @@
+# Maintainer: SteamOS-for-liuqin port
+# liuqin-mark-slot-successful —— 双系统（Android 槽位旋转）的 GPT 成功标记工具
+# 上游用于其 A/B 槽位布局（DISK_BYTES 等几何常量写死）。SteamOS 单系统（userdata）不需要；
+# 双系统（linux_root）布局未全量验证，包先装上备查，不启用。
+
+pkgname=liuqin-mark-slot-successful
+pkgver=0.6.0
+pkgrel=1
+pkgdesc="liuqin (Xiaomi Pad 6 Pro) boot slot success marker (for dual-slot layouts)"
+arch=('aarch64')
+license=('MIT')
+depends=('glibc')
+makedepends=('gcc' 'linux-api-headers')
+source=('liuqin-mark-slot-successful.c')
+sha256sums=('SKIP')
+
+build() {
+  gcc -O2 -Wall -o liuqin-mark-slot-successful liuqin-mark-slot-successful.c
+}
+
+package() {
+  install -Dm755 liuqin-mark-slot-successful "$pkgdir/usr/local/libexec/liuqin-mark-slot-successful"
+}
