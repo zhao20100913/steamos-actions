@@ -19,6 +19,7 @@ source=('firmware.manifest')
 sha256sums=('SKIP')
 
 package() {
+  install -d "$pkgdir/usr/lib"
   cp -a firmware/. "$pkgdir/usr/lib/firmware/"
   install -Dm644 firmware.manifest "$pkgdir/usr/share/doc/liuqin-firmware/firmware.manifest"
 }
