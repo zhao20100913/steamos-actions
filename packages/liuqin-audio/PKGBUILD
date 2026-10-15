@@ -11,9 +11,11 @@ pkgdesc="liuqin (Xiaomi Pad 6 Pro) ALSA UCM2 profile for quad CS35L41 (muted unt
 arch=('aarch64')
 license=('MIT')
 depends=('alsa-lib')
-source=('ucm2/')
-noextract=('ucm2')
-sha256sums=('SKIP')
+# ucm2/ 目录由 31-vendor-device-sources.sh 直接放入 src/（即 makepkg 的 $srcdir），
+# 不能写进 source=()——makepkg 的 source 只认文件/URL，目录条目会报
+# "was not found in the build directory and is not a URL"。
+source=()
+sha256sums=()
 
 package() {
   cp -a ucm2/. "$pkgdir/usr/share/alsa/ucm2/"
