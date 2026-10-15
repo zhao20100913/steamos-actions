@@ -13,9 +13,9 @@ pkgrel=1
 pkgdesc="liuqin (Xiaomi Pad 6 Pro) pinned board firmware closure"
 arch=('aarch64')
 license=('LicenseRef-Qualcomm' 'LicenseRef-Xiaomi' 'LicenseRef-CirrusLogic')
-source=('firmware/')
+source=('firmware/' 'firmware.manifest')
 noextract=('firmware')
-sha256sums=('SKIP')
+sha256sums=('SKIP' 'SKIP')
 
 package() {
   cp -a firmware/. "$pkgdir/usr/lib/firmware/"
