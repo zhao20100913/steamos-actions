@@ -100,12 +100,23 @@ if [[ -n "$STOCK_INPUTS_URL" ]]; then
   mkdir -p "$WORK/stock"
   curl -fsSL --retry 3 "$STOCK_INPUTS_URL" -o "$WORK/stock/stock-inputs.tar.gz" \
     || die "stock inputs 下载失败: $STOCK_INPUTS_URL"
+  tar -tzf "$WORK/stock/stock-inputs.tar.gz" > "$WORK/stock/.listing" \
+    || die "stock inputs 无法读取（不是有效 tar.gz）"
   tar -xzf "$WORK/stock/stock-inputs.tar.gz" -C "$WORK/stock" || die "stock inputs 解包失败"
   STOCK_INPUTS_DIR="$WORK/stock"
 fi
 if [[ -n "$STOCK_INPUTS_DIR" ]]; then
-  STOCK_OVERLAY_DIR="${STOCK_OVERLAY_DIR:-$STOCK_INPUTS_DIR/analysis/dtbo}"
-  STOCK_BASE_DIR="${STOCK_BASE_DIR:-$STOCK_INPUTS_DIR/analysis/vendor_boot/dtbs}"
+  # 自适应顶层布局：本仓库打包的 tar 顶层是 dtbo/ + vendor_boot/（无 analysis 前缀）
+  if [[ -d "$STOCK_INPUTS_DIR/analysis" ]]; then
+    _stock_root="$STOCK_INPUTS_DIR/analysis"
+  else
+    _stock_root="$STOCK_INPUTS_DIR"
+  fi
+  STOCK_OVERLAY_DIR="${STOCK_OVERLAY_DIR:-$_stock_root/dtbo}"
+  STOCK_BASE_DIR="${STOCK_BASE_DIR:-$_stock_root/vendor_boot/dtbs}"
+  if [[ ! -d "$STOCK_OVERLAY_DIR" || ! -d "$STOCK_BASE_DIR" ]]; then
+    die "stock inputs 布局不符：找不到 dtbo 条目 / vendor_boot dtbs。实际内容：$(head -5 "$WORK/stock/.listing" 2>/dev/null || echo 未记录)"
+  fi
 else
   die "缺少 stock inputs（--stock-inputs-url 或 --stock-inputs-dir）。没有原厂 dtbo/vendor_boot 产物，ABL 不会接受这个 boot.img。生产方法见仓库 README。"
 fi
