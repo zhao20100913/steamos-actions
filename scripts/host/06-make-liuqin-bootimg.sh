@@ -72,7 +72,7 @@ if [[ ! -r "$MKBOOTIMG_DIR/mkbootimg.py" || ! -r "$MKBOOTIMG_DIR/unpack_bootimg.
     cp -a "$XIAOMI/tools/local/aosp-mkbootimg/." "$MKBOOTIMG_DIR/"
     log "mkbootimg：googlesource 官方源获取成功"
   else
-    log "googlesource 官方源不可用，改用 GitHub 镜像（双文件哈希锁定）..."
+    log "googlesource 官方源不可用，改用 GitHub 镜像（哈希锁定）..."
     for pair in "mkbootimg.py:$MKBOOTIMG_PIN_MKBOOTIMG" "unpack_bootimg.py:$MKBOOTIMG_PIN_UNPACK"; do
       fname="${pair%%:*}"; pin="${pair##*:}"
       for attempt in 1 2 3; do
@@ -90,6 +90,23 @@ if [[ ! -r "$MKBOOTIMG_DIR/mkbootimg.py" || ! -r "$MKBOOTIMG_DIR/unpack_bootimg.
       chmod +x "$MKBOOTIMG_DIR/$fname"
       log "已校验: $fname = $pin"
     done
+    # AOSP android-16 的 mkbootimg.py 第 31 行 `from gki.generate_gki_certificate
+    # import generate_gki_certificate` 需要 gki/ 子模块（同仓库同分支，内容一致；
+    # 镜像没有该 commit 的完整 tarball，archive 哈希无法校验，故只锁定其余两文件）。
+    # 本地实测：补齐该文件后 `python3 mkbootimg.py --help` 可正常运行。
+    mkdir -p "$MKBOOTIMG_DIR/gki"
+    for attempt in 1 2 3; do
+      if curl -fsSL --max-time 60 \
+           "https://raw.githubusercontent.com/KleeUI/android_system_tools_mkbootimg/master/gki/generate_gki_certificate.py" \
+           -o "$MKBOOTIMG_DIR/gki/generate_gki_certificate.py"; then
+        break
+      fi
+      log "第 $attempt 次下载 gki/generate_gki_certificate.py 失败，5 秒后重试"
+      sleep 5
+    done
+    [[ -r "$MKBOOTIMG_DIR/gki/generate_gki_certificate.py" ]] || die "下载 gki/generate_gki_certificate.py 失败"
+    chmod +x "$MKBOOTIMG_DIR/gki/generate_gki_certificate.py"
+    log "已就绪: gki/generate_gki_certificate.py"
   fi
   [[ -r "$MKBOOTIMG_DIR/mkbootimg.py" ]] || die "mkbootimg.py 缺失"
   [[ -r "$MKBOOTIMG_DIR/unpack_bootimg.py" ]] || die "unpack_bootimg.py 缺失"
