@@ -22,11 +22,9 @@ warn() { printf '[%s] 警告: %s\n' "${0##*/}" "$*" >&2; }
 die()  { printf '[%s] 错误: %s\n' "${0##*/}" "$*" >&2; exit 1; }
 
 WORK="${WORK:-$PWD/work}"
-KERNEL_OUT="${KERNEL_OUT:-$WORK/out/kernel}"
 BOOT_MODE="${BOOT_MODE:-single (userdata)}"
 STOCK_INPUTS_URL="${STOCK_INPUTS_URL:-}"
 STOCK_INPUTS_DIR="${STOCK_INPUTS_DIR:-}"
-OUT_DIR="${OUT_DIR:-$WORK/out}"
 
 # 简易参数解析（也支持 --key value 形式）
 while [[ $# -gt 0 ]]; do
@@ -39,6 +37,13 @@ while [[ $# -gt 0 ]]; do
     *) die "未知参数 $1" ;;
   esac
 done
+
+# ⚠️ 依赖 WORK 的默认值必须在参数解析之后计算：
+# 之前 OUT_DIR 在 --work 生效前按旧 WORK($PWD/work) 算出，导致 boot.img
+# 被放到仓库下 work/out/ 而上传步骤找 _temp/liuqin/out/（run #10 卡点）。
+WORK="${WORK:-$PWD/work}"
+KERNEL_OUT="${KERNEL_OUT:-$WORK/out/kernel}"
+OUT_DIR="${OUT_DIR:-$WORK/out}"
 
 case "$BOOT_MODE" in
   "single (userdata)") LABEL="userdata" ;;
