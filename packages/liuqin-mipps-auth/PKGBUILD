@@ -8,7 +8,7 @@ pkgrel=1
 pkgdesc="liuqin (Xiaomi Pad 6 Pro) MiPPS/PPS charger and fuel-gauge authentication"
 arch=('aarch64')
 license=('GPL-2.0-only')
-depends=('python' 'systemd' 'flock')
+depends=('python' 'systemd' 'util-linux')
 source=(
   'liuqin-mipps-auth'
   'liuqin-mipps-auth.service'
