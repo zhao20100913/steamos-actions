@@ -18,5 +18,6 @@ source=()
 sha256sums=()
 
 package() {
+  install -d "$pkgdir/usr/share/alsa"
   cp -a ucm2/. "$pkgdir/usr/share/alsa/ucm2/"
 }
