@@ -33,9 +33,16 @@ cleanup() {
 trap cleanup EXIT
 
 rm -rf "$OUT"; mkdir -p "$OUT"
-# 把本仓库 packages/ 拷进 chroot（包含各包 src/ 里的载荷，PKGBUILD 的 source= 指向它们）
+# 把本仓库 packages/ 拷进 chroot。PKGBUILD 的 source=() 引用包目录根下的裸文件名/
+# 目录（如 ucm2/、firmware/、*.c），而 31 号脚本把载荷放在 src/ 下——这里把各包
+# src/ 内容合并到包目录根，makepkg 才能在构建目录找到全部 source 条目。
 sudo rm -rf "$MNT/build"; sudo mkdir -p "$MNT/build"
 sudo cp -a "$(cd "$SRC" && pwd)/." "$MNT/build/"
+for _p in "$MNT"/build/*/; do
+  if [[ -d "$_p/src" ]]; then
+    sudo cp -a "$_p/src/." "$_p/"
+  fi
+done
 
 for pkgdir in "$(cd "$SRC" && pwd)"/*/; do
   [[ -f "$pkgdir/PKGBUILD" ]] || continue

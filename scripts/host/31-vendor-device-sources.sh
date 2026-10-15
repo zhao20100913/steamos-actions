@@ -31,7 +31,8 @@ vendor liuqin-power-keyd \
   "$DEV/device/power-key/liuqin-power-keyd.c" \
   "$DEV/device/gnome-overlay/etc/systemd/system/liuqin-power-keyd.service" \
   "$DEV/device/gnome-overlay/usr/local/libexec/liuqin-power-key-action" \
-  "$DEV/device/gnome-overlay/usr/local/libexec/liuqin-power-menu"
+  "$DEV/device/gnome-overlay/usr/local/libexec/liuqin-power-menu" \
+  "$DEV/device/gnome-overlay/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml"
 
 vendor liuqin-charger-mode \
   "$DEV/device/charger-mode/liuqin-charger-mode" \
