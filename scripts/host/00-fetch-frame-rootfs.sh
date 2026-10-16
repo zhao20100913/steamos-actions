@@ -23,6 +23,7 @@
 set -euo pipefail
 log()  { printf '[%s] %s\n' "${0##*/}" "$*"; }
 die()  { printf '[%s] 错误: %s\n' "${0##*/}" "$*" >&2; exit 1; }
+log "00 脚本版本 v3（字节数校验版，2026-10-16）"
 
 FRAME_IMAGE_URL="${FRAME_IMAGE_URL:-https://steamdeck-images.steamos.cloud/recovery/steamframe-repair-latest.img.bz2}"
 WORK="${WORK:-/mnt/frame-work}"
@@ -70,20 +71,25 @@ log "rootfs 分区: $NAME 偏移=$OFF 长度=$LEN"
 printf '%s\t%s\t%s\n' "$OFF" "$LEN" "$NAME" > "$PART"
 
 # 第 2 遍：流式切出 rootfs 分区（精确字节，不等整盘解压）。
-# 全量下载可能被瞬时断流掐掉，外层再重试 3 次（间隔 10 秒）。
+# ⚠️ 成败判断只看目标文件字节数 == LEN：dd 切满 count 字节后会自动关闭管道，
+#    上游 curl 收到 SIGPIPE 报 curl:(23) "Failure writing output to destination"——
+#    这是"切完即停"的正常现象，不是下载失败，绝不能按管道退出码判断（run #11/12
+#    每次都实际下载成功，却因此被误判失败重下 3 次）。若流被真切断，文件会小于
+#    LEN，靠字节数比对仍能正确重试。
 log "流式切分 rootfs 分区（$((LEN / 1024 / 1024)) MiB）..."
 ok=0
 for attempt in 1 2 3; do
   rm -f "$FRAME"
-  if DLOAD | bunzip2 2>/dev/null | \
-       dd of="$FRAME" bs=1M iflag=skip_bytes,count_bytes skip="$OFF" count="$LEN" status=none \
-     && [[ -s "$FRAME" ]]; then
+  DLOAD 2>/dev/null | bunzip2 2>/dev/null | \
+    dd of="$FRAME" bs=1M iflag=skip_bytes,count_bytes skip="$OFF" count="$LEN" status=none || true
+  if [[ -e "$FRAME" ]] && [[ "$(stat -c%s "$FRAME")" -eq "$LEN" ]]; then
     ok=1; break
   fi
-  log "第 $attempt 次全量下载失败，10 秒后重试"
+  log "第 $attempt 次全量下载失败（切出 $(stat -c%s "$FRAME" 2>/dev/null || echo 0)/$LEN 字节），10 秒后重试"
   sleep 10
 done
 [[ "$ok" -eq 1 ]] || die "所有底包地址都取不到（已重试 3 次）"
+log "rootfs.frame 字节数校验通过（$LEN 字节）"
 
 # 记录底包版本（能读就读，读不到不致命）
 mkdir -p "$WORK/frame-mnt"
