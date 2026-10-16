@@ -28,7 +28,7 @@
 set -euo pipefail
 log()  { printf '[%s] %s\n' "${0##*/}" "$*"; }
 die()  { printf '[%s] 错误: %s\n' "${0##*/}" "$*" >&2; exit 1; }
-log "00 脚本版本 v4（分段并行下载版，2026-10-16）"
+log "00 脚本版本 v5（分段下载+CRC 内容校验，2026-10-16）"
 
 FRAME_IMAGE_URL="${FRAME_IMAGE_URL:-https://steamdeck-images.steamos.cloud/recovery/steamframe-repair-latest.img.bz2}"
 WORK="${WORK:-/mnt/frame-work}"
@@ -95,15 +95,14 @@ read -r OFF LEN NAME < <(python3 "$HERE/parse-gpt.py" "$HEAD" rootfs || die "GPT
 log "rootfs 分区: $NAME 偏移=$OFF 长度=$LEN"
 printf '%s\t%s\t%s\n' "$OFF" "$LEN" "$NAME" > "$PART"
 
-# 第 2 遍：分段并行下载完整 .bz2
+# 第 2 遍：分段并行下载完整 .bz2，并用 bzip2 全流 CRC 校验内容有效性。
+# ⚠️ 官方 CDN 的分段内容不稳定（实测同一区间可能时好时坏：字节数对、内容错，
+#    run #15 下载 4.07GB 全过但解压在 ~56MB 处挂掉）——只校验字节数不够，
+#    必须 `bunzip2 -t` 验证整文件；不过则换源重下一轮（并行下载约 1 分钟）。
 BEST_URL="" TOTAL=0
 read -r BEST_URL TOTAL < <(resolve_best_url) || die "无法解析底包地址/大小"
 log "底包: $BEST_URL"
 log "总大小: $TOTAL 字节（≈$((TOTAL / 1024 / 1024 / 1024))GiB），分块 $(( (TOTAL + CHUNK - 1) / CHUNK )) 个"
-log "开始分段并行下载（$PARALLEL 路）…"
-
-rm -rf "$CHUNKDIR"; mkdir -p "$CHUNKDIR"
-export CHUNK TOTAL BEST_URL CHUNKDIR
 
 # 分块下载 worker：i=块号，s/e 字节区间，每块最多 5 次尝试
 chunk_worker() {
@@ -112,35 +111,47 @@ chunk_worker() {
   [[ "$e" -ge "$TOTAL" ]] && e=$(( TOTAL - 1 ))
   f="$CHUNKDIR/$(printf "%05d" "$i")"
   for t in 1 2 3 4 5; do
-    curl -fL -sS --connect-timeout 30 --max-time 300 -r "$s-$e" "$BEST_URL" -o "$f" && return 0
+    curl -fL -sS --connect-timeout 30 --max-time 300 -r "$s-$e" "$DL_URL" -o "$f" && return 0
     sleep 3
   done
   return 1
 }
 export -f chunk_worker
 
-seq 0 $(( (TOTAL + CHUNK - 1) / CHUNK - 1 )) | xargs -P "$PARALLEL" -n 1 bash -c 'chunk_worker "$1"' _
+pass=0
+for cycle in 1 2 3 4 5; do
+  DL_URL="${CANDIDATES[$(( (cycle - 1) % ${#CANDIDATES[@]} ))]}"
+  log "第 $cycle 轮下载（$PARALLEL 路，源 ${DL_URL##*/}）…"
+  rm -rf "$CHUNKDIR"; mkdir -p "$CHUNKDIR"
+  export CHUNK TOTAL CHUNKDIR DL_URL
+  seq 0 $(( (TOTAL + CHUNK - 1) / CHUNK - 1 )) | xargs -P "$PARALLEL" -n 1 bash -c 'chunk_worker "$1"' _
 
-# 补齐缺失/不完整分块（最多 3 轮）
-MISSING=()
-for wave in 1 2 3; do
+  # 补齐缺失/不完整分块（最多 3 轮）
   MISSING=()
-  for i in $(seq 0 $(( (TOTAL + CHUNK - 1) / CHUNK - 1 ))); do
-    f="$CHUNKDIR/$(printf "%05d" "$i")"
-    want="$CHUNK"; [[ "$i" -eq $(( (TOTAL + CHUNK - 1) / CHUNK - 1 )) ]] && want=$(( TOTAL - ( (TOTAL + CHUNK - 1) / CHUNK - 1 ) * CHUNK ))
-    got="$(stat -c%s "$f" 2>/dev/null || echo 0)"
-    [[ "$got" -eq "$want" ]] || MISSING+=("$i")
+  for wave in 1 2 3; do
+    MISSING=()
+    for i in $(seq 0 $(( (TOTAL + CHUNK - 1) / CHUNK - 1 ))); do
+      f="$CHUNKDIR/$(printf "%05d" "$i")"
+      want="$CHUNK"; [[ "$i" -eq $(( (TOTAL + CHUNK - 1) / CHUNK - 1 )) ]] && want=$(( TOTAL - ( (TOTAL + CHUNK - 1) / CHUNK - 1 ) * CHUNK ))
+      got="$(stat -c%s "$f" 2>/dev/null || echo 0)"
+      [[ "$got" -eq "$want" ]] || MISSING+=("$i")
+    done
+    [[ "${#MISSING[@]}" -eq 0 ]] && break
+    log "第 $cycle 轮第 $wave 波补齐缺失分块（${#MISSING[@]} 个）…"
+    printf '%s\n' "${MISSING[@]}" | xargs -P "$PARALLEL" -n 1 bash -c 'chunk_worker "$1"' _
   done
-  [[ "${#MISSING[@]}" -eq 0 ]] && break
-  log "第 $wave 轮补齐缺失分块（${#MISSING[@]} 个）…"
-  printf '%s\n' "${MISSING[@]}" | xargs -P "$PARALLEL" -n 1 bash -c 'chunk_worker "$1"' _
-done
-[[ "${#MISSING[@]}" -eq 0 ]] || die "分块下载未完成（仍缺 ${#MISSING[@]} 个分块）"
+  [[ "${#MISSING[@]}" -eq 0 ]] || { log "第 $cycle 轮仍缺 ${#MISSING[@]} 个分块，换源重试"; continue; }
 
-cat "$CHUNKDIR"/* > "$BZ2"
-rm -rf "$CHUNKDIR"
-[[ "$(stat -c%s "$BZ2")" -eq "$TOTAL" ]] || die "底包拼合校验失败（$(stat -c%s "$BZ2")/$TOTAL 字节）"
-log "底包下载完成并校验通过（$TOTAL 字节）"
+  cat "$CHUNKDIR"/* > "$BZ2"
+  rm -rf "$CHUNKDIR"
+  [[ "$(stat -c%s "$BZ2")" -eq "$TOTAL" ]] || { log "第 $cycle 轮拼合大小不符（$(stat -c%s "$BZ2")/$TOTAL），重试"; continue; }
+  log "第 $cycle 轮下载完成（$TOTAL 字节），校验内容（bzip2 全流 CRC）…"
+  if bunzip2 -t "$BZ2" 2>/dev/null; then
+    pass=1; log "底包内容校验通过"; break
+  fi
+  log "第 $cycle 轮内容校验失败（CDN 分段内容波动），换源重下"
+done
+[[ "$pass" -eq 1 ]] || die "底包内容校验 5 轮均失败"
 
 # 第 3 遍：流式解压并切出 rootfs 分区。
 # ⚠️ 成败只看目标文件字节数 == LEN：dd 切满 count 字节后会自动关闭管道，上游
