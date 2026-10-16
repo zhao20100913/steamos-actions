@@ -34,35 +34,56 @@ FRAME="$OUT/rootfs.frame"
 
 sudo mkdir -p "$WORK" "$OUT"
 
-# 候选地址：`steamframe-repair-latest` 别名在 CDN 上可能 404（CI 实测），
-# 版本化文件名作为兜底；两个都试。函数把 bz2 流直接吐给 stdout。
+# 候选地址：latest 别名是稳定指针（302→当前版本化文件，实测可用），
+# 版本化文件名是兜底（防别名失效）；另从官方目录索引自动发现最新版本
+# （防旧版本被 CDN 清理后失联）。DLOAD 只报告成败不 die，由调用方处理失败。
 CANDIDATES=(
   "$FRAME_IMAGE_URL"
   "https://steamdeck-images.steamos.cloud/recovery/steamframe-oobe-repair-20260922.5153644-0.3.0.img.bz2"
-  "https://steamdeck-images.steamos.cloud/recovery/steamframe-repair-latest.img.bz2"
 )
+_discovered="$(curl -fsSL --max-time 30 "https://steamdeck-images.steamos.cloud/recovery/" 2>/dev/null \
+  | grep -oE 'steamframe-oobe-repair-[^"<]*img\.bz2' | sort -V | tail -1 || true)"
+[[ -n "$_discovered" ]] && CANDIDATES+=("https://steamdeck-images.steamos.cloud/recovery/$_discovered")
+
+# 大文件全量流易被 CDN 掐断（CI 实测），full 模式加 --retry 5 + --retry-all-errors
+# 覆盖连接级错误；head 模式只取前 4MiB（head 提前关管道会 SIGPIPE，属预期，
+# 不重试）。-sS 保留错误信息便于排查（pass 1 的 head 模式在调用处静音）。
 DLOAD() {
-  local u rc=1
+  local mode="${1:-full}" u rc=1
+  local _retry=()
+  [[ "$mode" == "full" ]] && _retry=(--retry 5 --retry-delay 5 --retry-all-errors)
   for u in "${CANDIDATES[@]}"; do
-    if curl -fsSL --retry 3 "$u" 2>/dev/null; then rc=0; break; fi
+    if curl -fL -sS --connect-timeout 30 --max-time 3600 "${_retry[@]}" "$u"; then
+      rc=0; break
+    fi
   done
-  [[ "$rc" -eq 0 ]] || die "所有底包地址都取不到"
+  return "$rc"
 }
 
 # 第 1 遍：只取前 4MiB 解析 GPT。head 提前关管道会让 curl/bunzip2 收到 SIGPIPE，
-# 属预期行为，用 || true 吞掉。
-DLOAD | bunzip2 2>/dev/null | head -c $((4 * 1024 * 1024)) > "$HEAD" || true
+# 属预期行为，用 || true 吞掉（head 模式静音，避免 SIGPIPE 报错刷屏）。
+DLOAD head 2>/dev/null | bunzip2 2>/dev/null | head -c $((4 * 1024 * 1024)) > "$HEAD" || true
 [[ -s "$HEAD" ]] || die "底包头部为空"
 
 read -r OFF LEN NAME < <(python3 "$HERE/parse-gpt.py" "$HEAD" rootfs || die "GPT 解析失败")
 log "rootfs 分区: $NAME 偏移=$OFF 长度=$LEN"
 printf '%s\t%s\t%s\n' "$OFF" "$LEN" "$NAME" > "$PART"
 
-# 第 2 遍：流式切出 rootfs 分区（精确字节，不等整盘解压）
+# 第 2 遍：流式切出 rootfs 分区（精确字节，不等整盘解压）。
+# 全量下载可能被瞬时断流掐掉，外层再重试 3 次（间隔 10 秒）。
 log "流式切分 rootfs 分区（$((LEN / 1024 / 1024)) MiB）..."
-DLOAD | bunzip2 2>/dev/null | \
-  dd of="$FRAME" bs=1M iflag=skip_bytes,count_bytes skip="$OFF" count="$LEN" status=none
-[[ -s "$FRAME" ]] || die "切出的 rootfs 为空"
+ok=0
+for attempt in 1 2 3; do
+  rm -f "$FRAME"
+  if DLOAD | bunzip2 2>/dev/null | \
+       dd of="$FRAME" bs=1M iflag=skip_bytes,count_bytes skip="$OFF" count="$LEN" status=none \
+     && [[ -s "$FRAME" ]]; then
+    ok=1; break
+  fi
+  log "第 $attempt 次全量下载失败，10 秒后重试"
+  sleep 10
+done
+[[ "$ok" -eq 1 ]] || die "所有底包地址都取不到（已重试 3 次）"
 
 # 记录底包版本（能读就读，读不到不致命）
 mkdir -p "$WORK/frame-mnt"
