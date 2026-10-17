@@ -321,22 +321,53 @@ jobs:
             -exec mv {} "$ROOTFS_MOUNT/tmp/boot.img" \;
           sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
           sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
-          # 工具链自检：rsync 铺层后偶发部分 /usr/bin 工具（sed/tail/depmod…）断链或缺失，
-          #   chroot 内执行会报 "cannot execute: required file not found"（exit 127）。
-          #   用 pacman 强制重装修复（chroot 内 pacman 可用且能联网，见上面 zenity 装包）。
+          # 工具链自检 + 强制修复：
+          # Frame 底包经 rsync/lay 后，coreutils 等核心二进制偶发“文件在但不可执行”
+          # （动态链接器/共享库缺失），chroot 内会报 "cannot execute: required file not found"（exit 127）。
+          # 必须把 cat/bash/glibc 等一起强制重装；重装失败直接让步骤失败，避免后面再踩坑。
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
+            set -e
             echo "--- 工具自检 ---"
-            for t in sed tail depmod tar find sort; do
+            broken=0
+            for t in bash sh cat sed tail depmod tar find sort pacman; do
               p="$(command -v "$t" 2>/dev/null || true)"
-              if [[ -n "$p" ]] && [[ -x "$p" ]]; then echo "OK   $t -> $p"; else echo "MISSING $t"; fi
+              if [[ -n "$p" && -x "$p" ]]; then
+                if "$p" --version >/dev/null 2>&1 || "$p" -h >/dev/null 2>&1 || "$p" --help >/dev/null 2>&1; then
+                  echo "OK   $t -> $p"
+                else
+                  echo "BROKEN $t -> $p (存在但不可执行)"
+                  broken=1
+                fi
+              else
+                echo "MISSING $t"
+                broken=1
+              fi
             done
-            echo "--- pacman 强制重装修复工具链 ---"
-            if pacman -S --noconfirm --force sed coreutils kmod tar >/tmp/tool-fix.log 2>&1; then
+
+            echo "--- pacman 强制重装核心工具链 ---"
+            pacman -Sy --noconfirm || true
+            if pacman -S --noconfirm --overwrite "*" \
+                 coreutils bash glibc filesystem sed kmod tar findutils util-linux \
+                 >/tmp/tool-fix.log 2>&1; then
               echo "工具链重装完成"
             else
-              echo "工具链重装失败（构建继续，depmod 可能不可用）"
+              echo "工具链重装失败，完整日志尾部："
+              tail -80 /tmp/tool-fix.log || true
+              tail -50 /var/log/pacman.log 2>/dev/null || true
+              exit 1
             fi
-          ' || echo "::warning::chroot 工具自检/修复异常，继续构建"
+
+            echo "--- 重装后再次自检 ---"
+            for t in cat sed depmod bash; do
+              p="$(command -v "$t")"
+              if "$p" --version >/dev/null 2>&1 || "$p" -h >/dev/null 2>&1; then
+                echo "OK $t"
+              else
+                echo "仍坏 $t"
+                exit 1
+              fi
+            done
+          '
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c \
             "PARTLABEL='${{ steps.parse.outputs.label }}' \
              WIFI_SSID='${{ inputs.wifi_ssid }}' WIFI_PSK='${{ inputs.wifi_password }}' \
