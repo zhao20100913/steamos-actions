@@ -321,14 +321,35 @@ jobs:
             -exec mv {} "$ROOTFS_MOUNT/tmp/boot.img" \;
           sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
           sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
-          # 工具链自检 + pacman 重装 + host 二进制兜底（含 install）
+
+          # ★ Host 侧解包内核模块（关键！）
+          # chroot 内 tar 在 pacman -U 后经常不可执行，导致模块静默没装上。
+          # 在 host（同为 aarch64）上直接解进已挂载的 rootfs，不依赖 chroot 工具链。
+          if [[ -f "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" ]]; then
+            echo "--- host 侧解包内核模块 ---"
+            sudo tar -tzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" | head -20 || true
+            sudo tar -xzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" -C "$ROOTFS_MOUNT"
+            echo "解包后 /usr/lib/modules 内容："
+            sudo ls -la "$ROOTFS_MOUNT/usr/lib/modules" || true
+            # 若仍然为空则失败，避免后面 verify 才发现
+            if ! sudo find "$ROOTFS_MOUNT/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d | grep -q .; then
+              echo "::error::内核模块解包后 /usr/lib/modules 仍为空"
+              exit 1
+            fi
+          else
+            echo "::error::未找到 kernel-modules.tar.gz，无法安装内核模块"
+            sudo find inputs "$ROOTFS_MOUNT/tmp" -type f \( -name '*.tar.gz' -o -name '*modules*' \) -ls 2>/dev/null || true
+            exit 1
+          fi
+
+          # 工具链自检 + pacman 重装 + host 二进制兜底
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
-            set -e
+            set +e
             echo "--- 工具自检 ---"
-            for t in bash sh cat sed tail depmod tar find sort pacman ln cp mv install; do
+            for t in bash sh cat sed tail depmod tar find sort pacman ln cp install; do
               p="$(command -v "$t" 2>/dev/null || true)"
               if [[ -n "$p" && -x "$p" ]]; then
-                if "$p" --version >/dev/null 2>&1 || "$p" -h >/dev/null 2>&1 || "$p" --help >/dev/null 2>&1; then
+                if "$p" --version >/dev/null 2>&1 || "$p" -h >/dev/null 2>&1; then
                   echo "OK   $t -> $p"
                 else
                   echo "BROKEN $t -> $p"
@@ -343,12 +364,12 @@ jobs:
               coreutils bash glibc filesystem sed kmod tar findutils util-linux \
               >/tmp/tool-fix.log 2>&1 \
               && echo "工具链重装完成" \
-              || { echo "工具链重装失败"; tail -40 /tmp/tool-fix.log || true; }
-          ' || echo "::warning::chroot 工具自检/重装有异常，继续用 host 二进制兜底"
+              || { echo "工具链重装失败"; tail -30 /tmp/tool-fix.log || true; }
+          ' || echo "::warning::chroot 工具自检/重装有异常，继续"
 
-          # Host 侧兜底：从同架构 runner 拷贝可用核心二进制进 chroot
+          # Host 二进制兜底
           echo "--- host 二进制兜底 ---"
-          for b in ln cat tee cp mv mkdir chmod chown rm ls install touch; do
+          for b in ln cat tee cp mv mkdir chmod chown rm ls install touch sort sed; do
             host_bin="$(command -v "$b" 2>/dev/null || true)"
             if [[ -n "$host_bin" && -x "$host_bin" ]]; then
               sudo cp -a "$host_bin" "$ROOTFS_MOUNT/usr/bin/$b" 2>/dev/null || true
@@ -356,14 +377,18 @@ jobs:
               echo "  restored $b from host"
             fi
           done
+
+          # 在 chroot 内跑一次 depmod（模块已由 host 解好）
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
-            for t in ln cat cp install bash; do
-              if command -v "$t" >/dev/null 2>&1 && "$t" --version >/dev/null 2>&1; then
-                echo "OK $t"
-              else
-                echo "STILL BROKEN $t"
-              fi
-            done
+            if command -v depmod >/dev/null 2>&1; then
+              depmod -a 2>/tmp/depmod.log && echo "depmod -a 完成" || {
+                echo "depmod -a 失败（不阻塞）"; tail -10 /tmp/depmod.log || true
+              }
+            else
+              echo "警告: depmod 不可用"
+            fi
+            echo "modules 版本目录:"
+            ls -1 /usr/lib/modules 2>/dev/null || echo "(空)"
           ' || true
 
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c \
