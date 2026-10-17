@@ -18,7 +18,10 @@
 #   KERNEL_MODULES_TAR   内核模块 tar.gz（默认 /tmp/kernel-modules.tar.gz）
 #   BUILD_KDE_MONITOR    1（默认）/0 —— 是否在镜像内自编系统监视器等 KDE 组件
 #   DOWNLOAD_STEAM_CLIENT 1（默认）/0 —— 是否预下载 Valve ARM Steam 客户端
-set -euo pipefail
+# 注意：Frame 底包经 rsync 后 coreutils（cat/ln/cp/sort/sed/install…）经常
+# “文件在但不可执行”。因此这里不用 set -e，改为关键步骤显式检查 + 全程兜底，
+# 避免某个外部命令挂掉就整段构建失败（exit 127）。
+set -uo pipefail
 log()  { printf '[%s] %s\n' "${0##*/}" "$*"; }
 warn() { printf '[%s] 警告: %s\n' "${0##*/}" "$*" >&2; }
 die()  { printf '[%s] 错误: %s\n' "${0##*/}" "$*" >&2; exit 1; }
@@ -87,51 +90,37 @@ else
     || warn "zenity 装不上，电源菜单可能不可用（电源键长短按仍由 daemon 处理）"
 fi
 
-# 3.4) pacman -U 后再次尝试修复核心工具（即使失败也继续，后续全部走兜底）
-log "pacman -U 后再次修复核心工具链..."
-pacman -S --noconfirm --overwrite "*" \
-  coreutils bash glibc filesystem sed kmod tar findutils util-linux \
-  >/tmp/tool-fix2.log 2>&1 \
-  && log "核心工具链二次修复完成" \
-  || warn "核心工具链二次修复失败（继续；后续命令均已加兜底）"
-
 # 3.5) 内核模块：把 boot.img 同批构建的模块树解进 /
 KMT="${KERNEL_MODULES_TAR:-/tmp/kernel-modules.tar.gz}"
 if [[ -s "$KMT" ]]; then
   tar -xzf "$KMT" -C / 2>/dev/null || warn "内核模块解包失败"
   # depmod -a 处理所有版本目录（Frame 残留目录一并重建索引，避免选错版本）
   if depmod -a >/tmp/liuqin-depmod.log 2>&1; then
-    KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | tail -1)"
+    KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -V | tail -1)"
     log "depmod -a 完成；最高版本目录: ${KVER:-无}"
   else
-    warn "depmod -a 失败（不阻塞构建；日志尾部见下）"
-    tail -10 /tmp/liuqin-depmod.log 2>/dev/null | while read -r l; do printf '    %s\n' "$l"; done 2>/dev/null || true
+    warn "depmod -a 失败（不阻塞构建；日志尾部见下，若提示工具缺失请确认 workflow 已跑工具链自检/重装）"
+    tail -10 /tmp/liuqin-depmod.log 2>/dev/null | sed 's/^/    /' 2>/dev/null || true
   fi
 else
   warn "缺少 $KMT —— 模块没装，depmod 跳过"
 fi
 
-# 4) fstab：完全用 bash 内建写，不依赖外部 cat/tee
-{
-  printf '%s\n' \
-    '# 由 10-graft-liuqin.sh 生成（SteamOS for liuqin）' \
-    "# root=PARTLABEL=$PARTLABEL 由 boot.img 的 cmdline 指定，这里保持同步；" \
-    '# x-systemd.growfs 让 rootfs 首启自动扩到分区实际大小。' \
-    "PARTLABEL=$PARTLABEL  /  ext4  defaults,x-systemd.growfs  0  1" \
-    'PARTLABEL=home        /home ext4  nofail,noatime        0  2'
-} > /etc/fstab
+# 4) fstab：根分区用 PARTLABEL（与 boot.img 的 cmdline root=PARTLABEL=<label> 一致）
+#    ⚠️ 不要照抄 sheng 写死的 /dev/sda30：liuqin 的 UFS 盘号/分区号不保证一致。
+#    独立的 home 分区（PARTLABEL=home）可选：有就挂、没有 nofail 照常启动（/home 留在 root 里）。
+cat > /etc/fstab <<EOF
+# 由 10-graft-liuqin.sh 生成（SteamOS for liuqin）
+# root=PARTLABEL=$PARTLABEL 由 boot.img 的 cmdline 指定，这里保持同步；
+# x-systemd.growfs 让 rootfs 首启自动扩到分区实际大小。
+PARTLABEL=$PARTLABEL  /  ext4  defaults,x-systemd.growfs  0  1
+PARTLABEL=home        /home ext4  nofail,noatime        0  2
+EOF
 log "已写 /etc/fstab（root=PARTLABEL=$PARTLABEL，home 可选）"
 
-# 5) 基本系统配置（时区多重兜底，不因 ln/cp 失败退出）
+# 5) 基本系统配置
 if [[ -e /usr/share/zoneinfo/Asia/Shanghai ]]; then
-  if ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null; then
-    log "时区已用 ln 链接到 Asia/Shanghai"
-  elif cp -a /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null; then
-    log "时区已用 cp 复制到 /etc/localtime"
-  else
-    printf 'Asia/Shanghai\n' > /etc/timezone 2>/dev/null || true
-    warn "ln/cp 都不可用，仅写入 /etc/timezone"
-  fi
+  ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
 fi
 if ! grep -q '^en_US.UTF-8' /etc/locale.gen 2>/dev/null; then
   printf 'en_US.UTF-8 UTF-8\n' >> /etc/locale.gen
@@ -139,32 +128,34 @@ fi
 locale-gen >/dev/null 2>&1 || true
 log "时区/locale 已配置"
 
-# 5.5) /var 骨架（用 mkdir -p，避免 install 不可执行）
-mkdir -p /var/lib/pacman /var/lib/dbus /var/log/journal /var/lib/systemd 2>/dev/null || true
+# 5.5) /var 骨架：Frame 的 /var 可能在独立子卷（var-A）里，若没并进来就是空的。
+#      systemd 首启会用 tmpfiles 补一部分，但 pacman 数据库、DBus、日志目录得先在。
+install -d /var/lib/pacman /var/lib/dbus /var/log/journal /var/lib/systemd
 log "/var 骨架已补齐（pacman/dbus/systemd/log 目录）"
 
 # 5.9) 停掉「按 Frame 分区表挂载」的单元 + GPT 自动挂载生成器
 #      症状（实机）：屏幕亮了但一直卡在等待 home 分区 —— systemd 在等
 #      dev-disk-by-partlabel-home.device，而设备上只有 userdata/linux_root。
-#      注意：此环境 coreutils（sort/sed/ln/install）可能不可执行，全部加 || true / 避免管道失败。
+#      做法：① 把设备型 .mount/.automount 屏蔽（按 What= 指向设备 的通用规则）
+#            ② 兜底屏蔽名字含 home/var/boot/esp/efi 的单元
+#            ③ 停用 systemd-gpt-auto-generator
 log "所有 mount/automount 单元文件："
 find /usr/lib/systemd/system /etc/systemd/system -maxdepth 1 \
-  \( -name '*.mount' -o -name '*.automount' \) 2>/dev/null | while read -r f; do
-  printf '    %s\n' "$f"
-done || true
+  \( -name '*.mount' -o -name '*.automount' \) 2>/dev/null | sort | sed 's/^/    /' || true
 
 masked=0
 while IFS= read -r u; do
   [[ -n "$u" ]] || continue
-  base="${u##*/}"
-  real="$(readlink -f "$u" 2>/dev/null || echo "$u")"
+  base="$(basename "$u")"
+  # 读真实文件内容（软链要跟到真文件）
+  real="$(readlink -f "$u")"
   [[ -f "$real" ]] || continue
   if grep -qE '^\s*What=\s*(/dev/|PARTLABEL=|LABEL=|UUID=|/dev/disk/)' "$real" 2>/dev/null; then
-    ln -sf /dev/null "/etc/systemd/system/$base" 2>/dev/null || true
+    ln -sf /dev/null "/etc/systemd/system/$base"
     rm -f "/etc/systemd/system/multi-user.target.wants/$base" 2>/dev/null || true
     masked=$((masked + 1))
   fi
-done < <(find /usr/lib/systemd/system /etc/systemd/system -maxdepth 1 \( -name '*.mount' -o -name '*.automount' \) 2>/dev/null || true)
+done < <(find /usr/lib/systemd/system /etc/systemd/system -maxdepth 1 \( -name '*.mount' -o -name '*.automount' \) 2>/dev/null)
 for base in home.mount var.mount boot.mount esp.mount efi.mount \
             'home\x2d.mount' 'var\x2d.mount' 'boot\x2d.mount' 'esp\x2d.mount'; do
   ln -sf /dev/null "/etc/systemd/system/$base" 2>/dev/null || true
@@ -172,25 +163,26 @@ done
 masked=$((masked + 6))
 log "已屏蔽 $masked 个设备型/Frame 挂载单元"
 
-# Valve partset + adbd gadget（不用 sort，避免 coreutils 不可执行导致 set -e 退出）
-while IFS= read -r u; do
-  [[ -n "$u" ]] || continue
-  base="${u##*/}"
-  ln -sf /dev/null "/etc/systemd/system/$base" 2>/dev/null || true
+# Valve partset + adbd gadget：SteamOS 用 /dev/disk/by-partset/<组>/<名> 指代分区，
+# liuqin 的分区表里没有 shared/home、shared/offload → 设备永远不出现；
+# adbd（Android USB gadget）在平板上无人应答，会以 no limit 卡住启动。
+for u in $(find /usr/lib/systemd/system /etc/systemd/system -maxdepth 1 \
+  \( -iname '*partset*' -o -iname '*adbd*' -o -iname '*adb*' -o -iname '*gadget*' -o -iname '*ffs*' \) 2>/dev/null | sort); do
+  base="$(basename "$u")"
+  ln -sf /dev/null "/etc/systemd/system/$base"
   log "已屏蔽 $base（Valve partset / adbd gadget）"
-done < <(find /usr/lib/systemd/system /etc/systemd/system -maxdepth 1 \
-  \( -iname '*partset*' -o -iname '*adbd*' -o -iname '*adb*' -o -iname '*gadget*' -o -iname '*ffs*' \) 2>/dev/null || true)
+done
 
 # 5.97) Deckard(Steam Frame) 专有硬件服务 + repart + v4l2loopback
+#   repart **必须**屏蔽：systemd-repart 会按 Valve 分区表改磁盘，在 Android 分区表上风险很高。
 systemctl mask systemd-repart.service 2>/dev/null || true
 rm -rf /etc/repart.d /usr/lib/repart.d /usr/lib/systemd/repart.d 2>/dev/null || true
-while IFS= read -r u; do
-  [[ -n "$u" ]] || continue
-  base="${u##*/}"
+for u in $(find /usr/lib/systemd/system /etc/systemd/system -maxdepth 1 \
+  \( -iname '*deckard*' -o -iname '*fpga*' -o -iname '*v4l2loopback*' -o -iname '*steamvr*' \) 2>/dev/null | sort); do
+  base="$(basename "$u")"
   ln -sf /dev/null "/etc/systemd/system/$base" 2>/dev/null || true
   log "已屏蔽 $base（Frame 专有硬件/v4l2loopback/SteamVR）"
-done < <(find /usr/lib/systemd/system /etc/systemd/system -maxdepth 1 \
-  \( -iname '*deckard*' -o -iname '*fpga*' -o -iname '*v4l2loopback*' -o -iname '*steamvr*' \) 2>/dev/null || true)
+done
 log "已屏蔽 systemd-repart + repart.d（防改分区表）"
 
 # 5.98) D-Bus 的 messagebus 用户/组 —— 实测 dbus-broker-launch 缺它时 5ms 退出 → 无系统总线 → 黑屏
@@ -205,7 +197,7 @@ log "messagebus: $(getent passwd messagebus || echo '仍不存在 ✗')"
 # 6) 服务：桌面会话（Frame 底包默认会话走 gamescope openvr 后端 → 平板黑帧，
 #    必须 SDDM 直连 Plasma；与 Ubuntu 镜像同一条已验证路径）
 if [[ -x /usr/bin/startplasma-wayland ]]; then
-  mkdir -p /usr/share/wayland-sessions 2>/dev/null || true
+  install -d /usr/share/wayland-sessions
   cat > /usr/share/wayland-sessions/plasma-liuqin.desktop <<'EOF'
 [Desktop Entry]
 Name=Plasma (Wayland, liuqin)
@@ -215,7 +207,7 @@ TryExec=/usr/bin/startplasma-wayland
 Type=Application
 DesktopNames=KDE
 EOF
-  mkdir -p /etc/sddm.conf.d 2>/dev/null || true
+  install -d /etc/sddm.conf.d
   cat > /etc/sddm.conf.d/zz-liuqin.conf <<'EOF'
 [Autologin]
 Session=plasma-liuqin.desktop
@@ -234,7 +226,7 @@ for u in $(awk -F: '$3>=1000 && $3<65534 {print $1":"$3":"$4":"$6}' /etc/passwd 
   gid_="${rest%%:*}"; home_="${rest#*:}"
   [[ -n "$home_" && "$home_" != "/" ]] || continue
   if [[ ! -d "$home_" ]]; then
-    mkdir -p "$home_" 2>/dev/null && chown "$uid_:$gid_" "$home_" 2>/dev/null \
+    install -d -o "$uid_" -g "$gid_" "$home_" 2>/dev/null \
       && log "已建家目录 $home_（$un）" || true
   fi
 done
@@ -242,17 +234,17 @@ log "用户列表：$(awk -F: '$3>=1000 && $3<65534 {printf "%s ", $1}' /etc/pas
 
 systemctl enable steamos-manager.service 2>/dev/null \
   && log "已启用 steamos-manager.service（系统侧）" || warn "启用 steamos-manager.service 失败"
-mkdir -p /etc/systemd/system/sddm.service.d 2>/dev/null || true
+install -d /etc/systemd/system/sddm.service.d
 cat > /etc/systemd/system/sddm.service.d/after-steamos-manager.conf <<'EOF'
 [Unit]
 Wants=steamos-manager.service
 After=steamos-manager.service
 EOF
 if [[ -f /usr/lib/steamos/gamescope-session ]]; then
-  sed -i 's/--backend openvr/--backend drm/' /usr/lib/steamos/gamescope-session 2>/dev/null \
-    && log "gamescope 后端已从 openvr 改为 drm（平板屏）" || true
+  sed -i 's/--backend openvr/--backend drm/' /usr/lib/steamos/gamescope-session \
+    && log "gamescope 后端已从 openvr 改为 drm（平板屏）"
 fi
-mkdir -p /etc/systemd/user 2>/dev/null || true
+install -d /etc/systemd/user
 ln -sf /dev/null /etc/systemd/user/steamvr-logs.service 2>/dev/null || true
 
 # 7) 无人值守配置：WiFi keyfile / root 密码 / sshd
