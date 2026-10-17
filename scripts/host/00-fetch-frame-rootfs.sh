@@ -33,7 +33,7 @@
 set -euo pipefail
 log()  { printf '[%s] %s\n' "${0##*/}" "$*"; }
 die()  { printf '[%s] 错误: %s\n' "${0##*/}" "$*" >&2; exit 1; }
-log "00 脚本版本 v7（zip 优先+严格 CRC+落盘切分，2026-10-17）"
+log "00 脚本版本 v7b（zip 优先+严格 CRC+字节级落盘切分，2026-10-17）"
 
 FRAME_IMAGE_URL="${FRAME_IMAGE_URL:-https://steamdeck-images.steamos.cloud/recovery/steamframe-repair-latest.img.bz2}"
 WORK="${WORK:-/mnt/frame-work}"
@@ -146,13 +146,11 @@ for cycle in 1 2 3 4 5 6; do
   log "rootfs 分区: $NAME 偏移=$OFF 长度=$LEN"
   printf '%s\t%s\t%s\n' "$OFF" "$LEN" "$NAME" > "$PART"
 
-  # 切分必须 1MiB 块对齐（rootfs-A = 320MiB 偏移 / 5GiB 长度，天然对齐）
-  if [[ $((OFF % 1048576)) -ne 0 ]] || [[ $((LEN % 1048576)) -ne 0 ]]; then
-    die "rootfs 分区非 1MiB 对齐（$OFF/$LEN），请改用字节级 dd"
-  fi
+  # 切分（文件输入 + 字节级 skip/count；实测精确。注意 rootfs-A 偏移 335561728
+  #   = 320MiB+17KiB，不是 1MiB 对齐，不能只用块计数）
   log "流式切分 rootfs 分区（$((LEN / 1024 / 1024)) MiB）…"
   rm -f "$FRAME"
-  dd if="$IMG_RAW" bs=1M skip=$((OFF / 1048576)) count=$((LEN / 1048576)) of="$FRAME" status=none
+  dd if="$IMG_RAW" bs=1M iflag=skip_bytes,count_bytes skip="$OFF" count="$LEN" of="$FRAME" status=none
   rm -f "$IMG_RAW"
   if [[ "$(stat -c%s "$FRAME")" -eq "$LEN" ]]; then
     pass=1; log "rootfs.frame 字节数校验通过（$LEN 字节）"; break
