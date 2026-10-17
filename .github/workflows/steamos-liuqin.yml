@@ -322,7 +322,7 @@ jobs:
           sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
           sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
 
-          # ★ 修复 usrmerge + 动态链接器（chroot 报 No such file 多半是 ld-linux 丢了）
+          # ★ 修复 usrmerge（保证 /bin /lib /sbin 是指向 usr/* 的软链）
           echo "--- 修复 usrmerge 布局 ---"
           for d in bin sbin lib lib64; do
             target="usr/$d"
@@ -341,61 +341,68 @@ jobs:
             fi
           done
 
-          # 确保动态链接器存在（aarch64）
+          # 检查动态链接器
           echo "--- 检查动态链接器 ---"
-          LD_FOUND=""
-          for ld in \
-            "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1" \
-            "$ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1" \
-            "$ROOTFS_MOUNT/usr/lib64/ld-linux-aarch64.so.1" \
-            "$ROOTFS_MOUNT/lib64/ld-linux-aarch64.so.1"; do
-            if [[ -e "$ld" ]]; then
-              echo "  found: $ld"
-              LD_FOUND=1
-              break
-            fi
-          done
-          if [[ -z "$LD_FOUND" ]]; then
-            echo "  动态链接器缺失，尝试从 rootfs 内查找..."
+          if [[ -e "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1" ]]; then
+            echo "  found: $ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1"
+          elif [[ -e "$ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1" ]]; then
+            echo "  found: $ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1"
+          else
             found="$(sudo find "$ROOTFS_MOUNT/usr" -name 'ld-linux-aarch64.so.1' 2>/dev/null | head -1 || true)"
             if [[ -n "$found" ]]; then
-              echo "  找到 $found，链接到标准位置"
-              sudo mkdir -p "$ROOTFS_MOUNT/usr/lib" "$ROOTFS_MOUNT/lib"
-              sudo ln -sfn "$(realpath --relative-to="$ROOTFS_MOUNT/usr/lib" "$found" 2>/dev/null || echo "$found")" \
-                "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1" 2>/dev/null || \
-                sudo cp -a "$found" "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1"
-              # /lib 若是软链会自动可见；否则再拷一份
-              if [[ -d "$ROOTFS_MOUNT/lib" && ! -L "$ROOTFS_MOUNT/lib" ]]; then
-                sudo cp -a "$found" "$ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1" 2>/dev/null || true
-              fi
+              sudo mkdir -p "$ROOTFS_MOUNT/usr/lib"
+              sudo cp -a "$found" "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1"
+              echo "  restored ld-linux from $found"
             else
-              echo "::error::rootfs 内找不到 ld-linux-aarch64.so.1，chroot 无法运行任何动态链接程序"
-              sudo ls -la "$ROOTFS_MOUNT/usr/lib/ld-"* "$ROOTFS_MOUNT/lib/ld-"* 2>/dev/null || true
-              sudo file "$ROOTFS_MOUNT/usr/bin/bash" 2>/dev/null || true
+              echo "::error::找不到 ld-linux-aarch64.so.1"
               exit 1
             fi
           fi
 
-          # 验证 bash 真的能在 chroot 里跑（而不只是 host 视角文件存在）
+          # 验证 chroot bash（必须在解包模块之前）
           echo "--- 验证 chroot bash ---"
           if ! sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c 'echo chroot-bash-ok'; then
-            echo "::error::chroot /usr/bin/bash 无法执行（动态链接器或依赖库仍有问题）"
+            echo "::error::chroot bash 无法执行"
             sudo file "$ROOTFS_MOUNT/usr/bin/bash" || true
-            sudo ls -la "$ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1" "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1" 2>/dev/null || true
-            # 打印 bash 需要的解释器路径
             sudo readelf -l "$ROOTFS_MOUNT/usr/bin/bash" 2>/dev/null | grep -i interpreter || true
             exit 1
           fi
           echo "chroot bash OK"
 
-          # ★ Host 侧解包内核模块
+          # ★ Host 侧解包内核模块 —— 绝不能直接 tar -C rootfs！
+          #   模块包内含 ./lib/ 目录，直接解压会把 /lib 软链盖成真实目录，
+          #   导致 ld-linux 消失、chroot 立刻全部失败。
           if [[ -f "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" ]]; then
-            echo "--- host 侧解包内核模块 ---"
-            sudo tar -xzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" -C "$ROOTFS_MOUNT" || \
-              echo "::warning::tar 解包有警告，继续检查"
-            if [[ -d "$ROOTFS_MOUNT/lib/modules" ]]; then
-              sudo mkdir -p "$ROOTFS_MOUNT/usr/lib/modules"
-              sudo cp -a "$ROOTFS_MOUNT/lib/modules"/. "$ROOTFS_MOUNT/usr/lib/modules"/ 2>/dev/null || true
+            echo "--- host 侧解包内核模块（安全模式）---"
+            KMOD_TMP="$(mktemp -d /tmp/kmod-XXXXXX)"
+            sudo tar -xzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" -C "$KMOD_TMP"
+            # 定位 modules 树
+            MOD_SRC=""
+            if [[ -d "$KMOD_TMP/lib/modules" ]]; then
+              MOD_SRC="$KMOD_TMP/lib/modules"
+            elif [[ -d "$KMOD_TMP/usr/lib/modules" ]]; then
+              MOD_SRC="$KMOD_TMP/usr/lib/modules"
+            else
+              MOD_SRC="$(sudo find "$KMOD_TMP" -type d -name modules 2>/dev/null | head -1 || true)"
+            fi
+            if [[ -z "$MOD_SRC" || ! -d "$MOD_SRC" ]]; then
+              echo "::error::模块包内找不到 modules 目录"
+              sudo find "$KMOD_TMP" -maxdepth 3 -type d | head -30 || true
+              sudo rm -rf "$KMOD_TMP"
+              exit 1
+            fi
+            echo "  模块源: $MOD_SRC"
+            sudo mkdir -p "$ROOTFS_MOUNT/usr/lib/modules"
+            sudo cp -a "$MOD_SRC"/. "$ROOTFS_MOUNT/usr/lib/modules"/
+            sudo rm -rf "$KMOD_TMP"
+            # 确认 /lib 仍是软链
+            if [[ ! -L "$ROOTFS_MOUNT/lib" ]]; then
+              echo "::warning::/lib 不再是软链，重新修复"
+              if [[ -d "$ROOTFS_MOUNT/lib" ]]; then
+                sudo cp -a "$ROOTFS_MOUNT/lib"/. "$ROOTFS_MOUNT/usr/lib"/ 2>/dev/null || true
+                sudo rm -rf "$ROOTFS_MOUNT/lib"
+              fi
+              sudo ln -sfn usr/lib "$ROOTFS_MOUNT/lib"
             fi
             echo "解包后 modules："
             sudo ls -la "$ROOTFS_MOUNT/usr/lib/modules" || true
@@ -403,7 +410,13 @@ jobs:
               echo "::error::未找到 6.17* 模块目录"
               exit 1
             fi
-            echo "内核模块就位 ✓"
+            # 再次验证 chroot（确认解包没破坏布局）
+            if ! sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c 'echo chroot-still-ok'; then
+              echo "::error::解包模块后 chroot 又坏了"
+              ls -la "$ROOTFS_MOUNT/lib" || true
+              exit 1
+            fi
+            echo "内核模块就位 ✓（chroot 仍正常）"
           else
             echo "::error::未找到 kernel-modules.tar.gz"
             exit 1
@@ -426,7 +439,7 @@ jobs:
               || { echo "工具链重装失败"; tail -20 /tmp/tool-fix.log || true; }
           ' || echo "::warning::chroot 工具自检/重装有异常，继续"
 
-          # Host 二进制兜底（仅作补充；优先用 rootfs 自己的）
+          # Host 二进制兜底
           echo "--- host 二进制兜底 ---"
           for b in ln cat tee cp mv mkdir chmod chown rm ls install touch sort sed; do
             host_bin="$(command -v "$b" 2>/dev/null || true)"
