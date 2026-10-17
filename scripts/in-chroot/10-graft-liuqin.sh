@@ -87,6 +87,16 @@ else
     || warn "zenity 装不上，电源菜单可能不可用（电源键长短按仍由 daemon 处理）"
 fi
 
+# 3.4) pacman -U --overwrite '*' 之后 coreutils/glibc 经常再次不可执行
+#      （cat/tee/ln/cp 等报 "cannot execute: required file not found"）。
+#      这里再强制重装一次核心工具，保证后续脚本能跑。
+log "pacman -U 后再次修复核心工具链..."
+pacman -S --noconfirm --overwrite "*" \
+  coreutils bash glibc filesystem sed kmod tar findutils util-linux \
+  >/tmp/tool-fix2.log 2>&1 \
+  && log "核心工具链二次修复完成" \
+  || warn "核心工具链二次修复失败（继续尝试；日志见 /tmp/tool-fix2.log）"
+
 # 3.5) 内核模块：把 boot.img 同批构建的模块树解进 /
 KMT="${KERNEL_MODULES_TAR:-/tmp/kernel-modules.tar.gz}"
 if [[ -s "$KMT" ]]; then
@@ -106,7 +116,7 @@ fi
 # 4) fstab：根分区用 PARTLABEL（与 boot.img 的 cmdline root=PARTLABEL=<label> 一致）
 #    ⚠️ 不要照抄 sheng 写死的 /dev/sda30：liuqin 的 UFS 盘号/分区号不保证一致。
 #    独立的 home 分区（PARTLABEL=home）可选：有就挂、没有 nofail 照常启动（/home 留在 root 里）。
-#    完全用 bash 内建写文件，不调用外部 cat/tee（coreutils 在 pacman -U 后偶发再次不可执行）。
+#    完全用 bash 内建写文件，不调用外部 cat/tee。
 {
   printf '%s\n' \
     '# 由 10-graft-liuqin.sh 生成（SteamOS for liuqin）' \
