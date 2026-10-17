@@ -106,14 +106,15 @@ fi
 # 4) fstab：根分区用 PARTLABEL（与 boot.img 的 cmdline root=PARTLABEL=<label> 一致）
 #    ⚠️ 不要照抄 sheng 写死的 /dev/sda30：liuqin 的 UFS 盘号/分区号不保证一致。
 #    独立的 home 分区（PARTLABEL=home）可选：有就挂、没有 nofail 照常启动（/home 留在 root 里）。
-#    使用 tee 而不是 cat，避免 coreutils 未完全修复时外部 cat 不可执行。
-tee /etc/fstab >/dev/null <<EOF
-# 由 10-graft-liuqin.sh 生成（SteamOS for liuqin）
-# root=PARTLABEL=$PARTLABEL 由 boot.img 的 cmdline 指定，这里保持同步；
-# x-systemd.growfs 让 rootfs 首启自动扩到分区实际大小。
-PARTLABEL=$PARTLABEL  /  ext4  defaults,x-systemd.growfs  0  1
-PARTLABEL=home        /home ext4  nofail,noatime        0  2
-EOF
+#    完全用 bash 内建写文件，不调用外部 cat/tee（coreutils 在 pacman -U 后偶发再次不可执行）。
+{
+  printf '%s\n' \
+    '# 由 10-graft-liuqin.sh 生成（SteamOS for liuqin）' \
+    "# root=PARTLABEL=$PARTLABEL 由 boot.img 的 cmdline 指定，这里保持同步；" \
+    '# x-systemd.growfs 让 rootfs 首启自动扩到分区实际大小。' \
+    "PARTLABEL=$PARTLABEL  /  ext4  defaults,x-systemd.growfs  0  1" \
+    'PARTLABEL=home        /home ext4  nofail,noatime        0  2'
+} > /etc/fstab
 log "已写 /etc/fstab（root=PARTLABEL=$PARTLABEL，home 可选）"
 
 # 5) 基本系统配置
