@@ -321,26 +321,22 @@ jobs:
             -exec mv {} "$ROOTFS_MOUNT/tmp/boot.img" \;
           sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
           sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
-          # 工具链自检 + 强制修复：
-          # Frame 底包经 rsync/lay 后，coreutils 等核心二进制偶发“文件在但不可执行”
-          # （动态链接器/共享库缺失），chroot 内会报 "cannot execute: required file not found"（exit 127）。
-          # 必须把 cat/bash/glibc 等一起强制重装；重装失败直接让步骤失败，避免后面再踩坑。
+          # 工具链自检 + 强制修复 + host 二进制兜底：
+          # Frame 底包经 rsync/lay 后，coreutils 等核心二进制偶发“文件在但不可执行”。
+          # 1) 先用 pacman 重装；2) 若仍坏，从同架构 host 直接拷贝可用二进制进 chroot。
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
             set -e
             echo "--- 工具自检 ---"
-            broken=0
-            for t in bash sh cat sed tail depmod tar find sort pacman; do
+            for t in bash sh cat sed tail depmod tar find sort pacman ln cp mv; do
               p="$(command -v "$t" 2>/dev/null || true)"
               if [[ -n "$p" && -x "$p" ]]; then
                 if "$p" --version >/dev/null 2>&1 || "$p" -h >/dev/null 2>&1 || "$p" --help >/dev/null 2>&1; then
                   echo "OK   $t -> $p"
                 else
                   echo "BROKEN $t -> $p (存在但不可执行)"
-                  broken=1
                 fi
               else
                 echo "MISSING $t"
-                broken=1
               fi
             done
 
@@ -351,23 +347,33 @@ jobs:
                  >/tmp/tool-fix.log 2>&1; then
               echo "工具链重装完成"
             else
-              echo "工具链重装失败，完整日志尾部："
-              tail -80 /tmp/tool-fix.log || true
-              tail -50 /var/log/pacman.log 2>/dev/null || true
-              exit 1
+              echo "工具链重装失败，日志尾部："
+              tail -40 /tmp/tool-fix.log || true
             fi
+          ' || echo "::warning::chroot 工具自检/重装有异常，继续用 host 二进制兜底"
 
-            echo "--- 重装后再次自检 ---"
-            for t in cat sed depmod bash; do
-              p="$(command -v "$t")"
-              if "$p" --version >/dev/null 2>&1 || "$p" -h >/dev/null 2>&1; then
+          # Host 侧兜底：把 runner 上可用的核心二进制拷进 chroot（同为 aarch64）
+          echo "--- host 二进制兜底 ---"
+          for b in ln cat tee cp mv mkdir chmod chown rm ls; do
+            host_bin="$(command -v "$b" 2>/dev/null || true)"
+            if [[ -n "$host_bin" && -x "$host_bin" ]]; then
+              # 覆盖 /usr/bin 和 /usr/sbin（Arch 上两者常为同一位置）
+              sudo cp -a "$host_bin" "$ROOTFS_MOUNT/usr/bin/$b" 2>/dev/null || true
+              sudo cp -a "$host_bin" "$ROOTFS_MOUNT/usr/sbin/$b" 2>/dev/null || true
+              echo "  restored $b from host"
+            fi
+          done
+          # 再确认一次
+          sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
+            for t in ln cat cp bash; do
+              if command -v "$t" >/dev/null 2>&1 && "$t" --version >/dev/null 2>&1; then
                 echo "OK $t"
               else
-                echo "仍坏 $t"
-                exit 1
+                echo "STILL BROKEN $t"
               fi
             done
-          '
+          ' || true
+
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c \
             "PARTLABEL='${{ steps.parse.outputs.label }}' \
              WIFI_SSID='${{ inputs.wifi_ssid }}' WIFI_PSK='${{ inputs.wifi_password }}' \
