@@ -96,7 +96,8 @@ if [[ -s "$KMT" ]]; then
     KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -V | tail -1)"
     log "depmod -a 完成；最高版本目录: ${KVER:-无}"
   else
-    warn "depmod -a 失败，尾部日志："; tail -10 /tmp/liuqin-depmod.log | sed 's/^/    /'
+    warn "depmod -a 失败（不阻塞构建；日志尾部见下，若提示工具缺失请确认 workflow 已跑工具链自检/重装）"
+    tail -10 /tmp/liuqin-depmod.log 2>/dev/null | sed 's/^/    /' 2>/dev/null || true
   fi
 else
   warn "缺少 $KMT —— 模块没装，depmod 跳过"
