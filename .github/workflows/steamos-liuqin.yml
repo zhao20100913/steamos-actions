@@ -322,41 +322,61 @@ jobs:
           sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
           sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
 
-          # ★ Host 侧解包内核模块（关键！）
-          # chroot 内 tar 在 pacman -U 后经常不可执行，导致模块静默没装上。
-          # 在 host（同为 aarch64）上直接解进已挂载的 rootfs，不依赖 chroot 工具链。
+          # ★ 修复 usrmerge 布局（Frame lay 后 /bin /lib /sbin 可能不是指向 /usr/* 的软链）
+          echo "--- 修复 usrmerge 布局 ---"
+          for d in bin sbin lib lib64; do
+            if [[ -d "$ROOTFS_MOUNT/$d" && ! -L "$ROOTFS_MOUNT/$d" ]]; then
+              echo "  $d 是真实目录，合并到 usr/$d"
+              sudo mkdir -p "$ROOTFS_MOUNT/usr/$d"
+              if [[ -n "$(sudo ls -A "$ROOTFS_MOUNT/$d" 2>/dev/null || true)" ]]; then
+                sudo cp -a "$ROOTFS_MOUNT/$d"/. "$ROOTFS_MOUNT/usr/$d"/ 2>/dev/null || true
+              fi
+              sudo rm -rf "$ROOTFS_MOUNT/$d"
+              sudo ln -sfn "usr/$d" "$ROOTFS_MOUNT/$d"
+            elif [[ ! -e "$ROOTFS_MOUNT/$d" ]]; then
+              echo "  补 $d -> usr/$d"
+              sudo mkdir -p "$ROOTFS_MOUNT/usr/$d"
+              sudo ln -sfn "usr/$d" "$ROOTFS_MOUNT/$d"
+            fi
+          done
+          if [[ ! -x "$ROOTFS_MOUNT/usr/bin/bash" ]]; then
+            echo "::error::rootfs 缺少 /usr/bin/bash"
+            sudo ls -la "$ROOTFS_MOUNT/usr/bin/bash" "$ROOTFS_MOUNT/bin/bash" 2>/dev/null || true
+            exit 1
+          fi
+          echo "chroot bash: /usr/bin/bash OK"
+
+          # ★ Host 侧解包内核模块（不依赖 chroot 内可能已坏的 tar）
           if [[ -f "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" ]]; then
             echo "--- host 侧解包内核模块 ---"
-            sudo tar -tzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" | head -20 || true
-            sudo tar -xzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" -C "$ROOTFS_MOUNT"
-            echo "解包后 /usr/lib/modules 内容："
+            sudo tar -xzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" -C "$ROOTFS_MOUNT" || \
+              echo "::warning::tar 解包有警告，继续检查结果"
+            # 模块可能落在 /lib/modules，统一到 /usr/lib/modules
+            if [[ -d "$ROOTFS_MOUNT/lib/modules" ]]; then
+              sudo mkdir -p "$ROOTFS_MOUNT/usr/lib/modules"
+              sudo cp -a "$ROOTFS_MOUNT/lib/modules"/. "$ROOTFS_MOUNT/usr/lib/modules"/ 2>/dev/null || true
+            fi
+            echo "解包后 modules 目录："
             sudo ls -la "$ROOTFS_MOUNT/usr/lib/modules" || true
-            # 若仍然为空则失败，避免后面 verify 才发现
-            if ! sudo find "$ROOTFS_MOUNT/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d | grep -q .; then
-              echo "::error::内核模块解包后 /usr/lib/modules 仍为空"
+            if ! sudo find "$ROOTFS_MOUNT/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -name '6.17*' | grep -q .; then
+              echo "::error::未找到 6.17* 模块目录"
+              sudo find "$ROOTFS_MOUNT" -path '*/modules/6.17*' -type d 2>/dev/null | head -20 || true
               exit 1
             fi
+            echo "内核模块就位 ✓"
           else
-            echo "::error::未找到 kernel-modules.tar.gz，无法安装内核模块"
-            sudo find inputs "$ROOTFS_MOUNT/tmp" -type f \( -name '*.tar.gz' -o -name '*modules*' \) -ls 2>/dev/null || true
+            echo "::error::未找到 kernel-modules.tar.gz"
+            sudo find inputs "$ROOTFS_MOUNT/tmp" -type f \( -name '*modules*' -o -name '*.tar.gz' \) 2>/dev/null | head -20 || true
             exit 1
           fi
 
-          # 工具链自检 + pacman 重装 + host 二进制兜底
-          sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
+          # 工具链自检 + pacman 重装（用 /usr/bin/bash）
+          sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c '
             set +e
             echo "--- 工具自检 ---"
             for t in bash sh cat sed tail depmod tar find sort pacman ln cp install; do
               p="$(command -v "$t" 2>/dev/null || true)"
-              if [[ -n "$p" && -x "$p" ]]; then
-                if "$p" --version >/dev/null 2>&1 || "$p" -h >/dev/null 2>&1; then
-                  echo "OK   $t -> $p"
-                else
-                  echo "BROKEN $t -> $p"
-                fi
-              else
-                echo "MISSING $t"
-              fi
+              if [[ -n "$p" && -x "$p" ]]; then echo "OK   $t -> $p"; else echo "MISSING/BROKEN $t"; fi
             done
             echo "--- pacman 强制重装核心工具链 ---"
             pacman -Sy --noconfirm || true
@@ -364,34 +384,29 @@ jobs:
               coreutils bash glibc filesystem sed kmod tar findutils util-linux \
               >/tmp/tool-fix.log 2>&1 \
               && echo "工具链重装完成" \
-              || { echo "工具链重装失败"; tail -30 /tmp/tool-fix.log || true; }
+              || { echo "工具链重装失败"; tail -20 /tmp/tool-fix.log || true; }
           ' || echo "::warning::chroot 工具自检/重装有异常，继续"
 
           # Host 二进制兜底
           echo "--- host 二进制兜底 ---"
-          for b in ln cat tee cp mv mkdir chmod chown rm ls install touch sort sed; do
+          for b in ln cat tee cp mv mkdir chmod chown rm ls install touch sort sed bash; do
             host_bin="$(command -v "$b" 2>/dev/null || true)"
             if [[ -n "$host_bin" && -x "$host_bin" ]]; then
               sudo cp -a "$host_bin" "$ROOTFS_MOUNT/usr/bin/$b" 2>/dev/null || true
-              sudo cp -a "$host_bin" "$ROOTFS_MOUNT/usr/sbin/$b" 2>/dev/null || true
-              echo "  restored $b from host"
+              echo "  restored $b"
             fi
           done
 
-          # 在 chroot 内跑一次 depmod（模块已由 host 解好）
-          sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
+          # chroot 内 depmod
+          sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c '
+            set +e
             if command -v depmod >/dev/null 2>&1; then
-              depmod -a 2>/tmp/depmod.log && echo "depmod -a 完成" || {
-                echo "depmod -a 失败（不阻塞）"; tail -10 /tmp/depmod.log || true
-              }
-            else
-              echo "警告: depmod 不可用"
+              depmod -a && echo "depmod -a 完成" || echo "depmod -a 失败（不阻塞）"
             fi
-            echo "modules 版本目录:"
-            ls -1 /usr/lib/modules 2>/dev/null || echo "(空)"
+            echo "modules:"; ls -1 /usr/lib/modules 2>/dev/null || echo "(空)"
           ' || true
 
-          sudo chroot "$ROOTFS_MOUNT" /bin/bash -c \
+          sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c \
             "PARTLABEL='${{ steps.parse.outputs.label }}' \
              WIFI_SSID='${{ inputs.wifi_ssid }}' WIFI_PSK='${{ inputs.wifi_password }}' \
              ROOT_PW='${{ inputs.root_password }}' SSH_PUBKEY='${{ inputs.ssh_pubkey }}' \
