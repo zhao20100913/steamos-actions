@@ -89,13 +89,22 @@ fi
 
 # 3.4) pacman -U --overwrite '*' 之后 coreutils/glibc 经常再次不可执行
 #      （cat/tee/ln/cp 等报 "cannot execute: required file not found"）。
-#      这里再强制重装一次核心工具，保证后续脚本能跑。
+#      这里再强制重装一次核心工具，并做可执行性检查。
 log "pacman -U 后再次修复核心工具链..."
 pacman -S --noconfirm --overwrite "*" \
   coreutils bash glibc filesystem sed kmod tar findutils util-linux \
   >/tmp/tool-fix2.log 2>&1 \
   && log "核心工具链二次修复完成" \
   || warn "核心工具链二次修复失败（继续尝试；日志见 /tmp/tool-fix2.log）"
+
+# 二次确认关键命令是否真的能跑；不行就告警（后续尽量走 bash 内建兜底）
+for t in ln cat cp mv; do
+  if command -v "$t" >/dev/null 2>&1 && "$t" --version >/dev/null 2>&1; then
+    log "  ✓ $t 可用"
+  else
+    warn "  ✗ $t 仍不可用（后续相关步骤会尽量兜底）"
+  fi
+done
 
 # 3.5) 内核模块：把 boot.img 同批构建的模块树解进 /
 KMT="${KERNEL_MODULES_TAR:-/tmp/kernel-modules.tar.gz}"
@@ -128,8 +137,17 @@ fi
 log "已写 /etc/fstab（root=PARTLABEL=$PARTLABEL，home 可选）"
 
 # 5) 基本系统配置
+#    ln 在此环境可能再次不可执行，做兜底：先试 ln，失败则用 cp，再失败就跳过。
 if [[ -e /usr/share/zoneinfo/Asia/Shanghai ]]; then
-  ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+  if ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null; then
+    log "时区已用 ln 链接到 Asia/Shanghai"
+  elif command -v cp >/dev/null 2>&1 && cp -a /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null; then
+    log "时区已用 cp 复制到 /etc/localtime"
+  else
+    # 最后兜底：只写 /etc/timezone，让后续 localed/systemd 处理
+    printf 'Asia/Shanghai\n' > /etc/timezone 2>/dev/null || true
+    warn "ln/cp 都不可用，仅写入 /etc/timezone"
+  fi
 fi
 if ! grep -q '^en_US.UTF-8' /etc/locale.gen 2>/dev/null; then
   printf 'en_US.UTF-8 UTF-8\n' >> /etc/locale.gen
