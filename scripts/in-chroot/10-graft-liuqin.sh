@@ -18,9 +18,7 @@
 #   KERNEL_MODULES_TAR   内核模块 tar.gz（默认 /tmp/kernel-modules.tar.gz）
 #   BUILD_KDE_MONITOR    1（默认）/0 —— 是否在镜像内自编系统监视器等 KDE 组件
 #   DOWNLOAD_STEAM_CLIENT 1（默认）/0 —— 是否预下载 Valve ARM Steam 客户端
-# 注意：Frame 底包经 rsync 后 coreutils（cat/ln/cp/sort/sed/install…）经常
-# “文件在但不可执行”。因此这里不用 set -e，改为关键步骤显式检查 + 全程兜底，
-# 避免某个外部命令挂掉就整段构建失败（exit 127）。
+# Frame 底包 coreutils 经常不可执行；不用 set -e，避免 exit 127 中断整段注入
 set -uo pipefail
 log()  { printf '[%s] %s\n' "${0##*/}" "$*"; }
 warn() { printf '[%s] 警告: %s\n' "${0##*/}" "$*" >&2; }
@@ -90,21 +88,26 @@ else
     || warn "zenity 装不上，电源菜单可能不可用（电源键长短按仍由 daemon 处理）"
 fi
 
-# 3.5) 内核模块：把 boot.img 同批构建的模块树解进 /
+# 3.5) 内核模块：优先使用 workflow 在 host 侧已解好的模块；若目录为空再尝试 chroot 内解包
 KMT="${KERNEL_MODULES_TAR:-/tmp/kernel-modules.tar.gz}"
-if [[ -s "$KMT" ]]; then
-  tar -xzf "$KMT" -C / 2>/dev/null || warn "内核模块解包失败"
-  # depmod -a 处理所有版本目录（Frame 残留目录一并重建索引，避免选错版本）
-  if depmod -a >/tmp/liuqin-depmod.log 2>&1; then
-    KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -V | tail -1)"
-    log "depmod -a 完成；最高版本目录: ${KVER:-无}"
-  else
-    warn "depmod -a 失败（不阻塞构建；日志尾部见下，若提示工具缺失请确认 workflow 已跑工具链自检/重装）"
-    tail -10 /tmp/liuqin-depmod.log 2>/dev/null | sed 's/^/    /' 2>/dev/null || true
-  fi
+if find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
+  log "内核模块目录已存在（由 host 侧预解包），跳过 tar"
 else
-  warn "缺少 $KMT —— 模块没装，depmod 跳过"
+  if [[ -s "$KMT" ]]; then
+    tar -xzf "$KMT" -C / 2>/dev/null && log "chroot 内解包内核模块完成" \
+      || warn "内核模块解包失败（若 host 侧也未解成功，verify 会报错）"
+  else
+    warn "缺少 $KMT 且 /usr/lib/modules 为空 —— 模块没装"
+  fi
 fi
+if depmod -a >/tmp/liuqin-depmod.log 2>&1; then
+  KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | tail -1)"
+  log "depmod -a 完成；最高版本目录: ${KVER:-无}"
+else
+  warn "depmod -a 失败（不阻塞构建）"
+  tail -10 /tmp/liuqin-depmod.log 2>/dev/null | while read -r l; do printf '    %s\n' "$l"; done 2>/dev/null || true
+fi
+KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | tail -1 || true)"
 
 # 4) fstab：根分区用 PARTLABEL（与 boot.img 的 cmdline root=PARTLABEL=<label> 一致）
 #    ⚠️ 不要照抄 sheng 写死的 /dev/sda30：liuqin 的 UFS 盘号/分区号不保证一致。
