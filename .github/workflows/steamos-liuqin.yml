@@ -322,55 +322,94 @@ jobs:
           sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
           sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
 
-          # ★ 修复 usrmerge 布局（Frame lay 后 /bin /lib /sbin 可能不是指向 /usr/* 的软链）
+          # ★ 修复 usrmerge + 动态链接器（chroot 报 No such file 多半是 ld-linux 丢了）
           echo "--- 修复 usrmerge 布局 ---"
           for d in bin sbin lib lib64; do
-            if [[ -d "$ROOTFS_MOUNT/$d" && ! -L "$ROOTFS_MOUNT/$d" ]]; then
-              echo "  $d 是真实目录，合并到 usr/$d"
-              sudo mkdir -p "$ROOTFS_MOUNT/usr/$d"
-              if [[ -n "$(sudo ls -A "$ROOTFS_MOUNT/$d" 2>/dev/null || true)" ]]; then
-                sudo cp -a "$ROOTFS_MOUNT/$d"/. "$ROOTFS_MOUNT/usr/$d"/ 2>/dev/null || true
-              fi
+            target="usr/$d"
+            if [[ -L "$ROOTFS_MOUNT/$d" ]]; then
+              echo "  $d 已是软链 -> $(readlink "$ROOTFS_MOUNT/$d" || true)"
+            elif [[ -d "$ROOTFS_MOUNT/$d" ]]; then
+              echo "  $d 是真实目录，合并到 $target"
+              sudo mkdir -p "$ROOTFS_MOUNT/$target"
+              sudo cp -a "$ROOTFS_MOUNT/$d"/. "$ROOTFS_MOUNT/$target"/ 2>/dev/null || true
               sudo rm -rf "$ROOTFS_MOUNT/$d"
-              sudo ln -sfn "usr/$d" "$ROOTFS_MOUNT/$d"
-            elif [[ ! -e "$ROOTFS_MOUNT/$d" ]]; then
-              echo "  补 $d -> usr/$d"
-              sudo mkdir -p "$ROOTFS_MOUNT/usr/$d"
-              sudo ln -sfn "usr/$d" "$ROOTFS_MOUNT/$d"
+              sudo ln -sfn "$target" "$ROOTFS_MOUNT/$d"
+            else
+              echo "  补 $d -> $target"
+              sudo mkdir -p "$ROOTFS_MOUNT/$target"
+              sudo ln -sfn "$target" "$ROOTFS_MOUNT/$d"
             fi
           done
-          if [[ ! -x "$ROOTFS_MOUNT/usr/bin/bash" ]]; then
-            echo "::error::rootfs 缺少 /usr/bin/bash"
-            sudo ls -la "$ROOTFS_MOUNT/usr/bin/bash" "$ROOTFS_MOUNT/bin/bash" 2>/dev/null || true
+
+          # 确保动态链接器存在（aarch64）
+          echo "--- 检查动态链接器 ---"
+          LD_FOUND=""
+          for ld in \
+            "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1" \
+            "$ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1" \
+            "$ROOTFS_MOUNT/usr/lib64/ld-linux-aarch64.so.1" \
+            "$ROOTFS_MOUNT/lib64/ld-linux-aarch64.so.1"; do
+            if [[ -e "$ld" ]]; then
+              echo "  found: $ld"
+              LD_FOUND=1
+              break
+            fi
+          done
+          if [[ -z "$LD_FOUND" ]]; then
+            echo "  动态链接器缺失，尝试从 rootfs 内查找..."
+            found="$(sudo find "$ROOTFS_MOUNT/usr" -name 'ld-linux-aarch64.so.1' 2>/dev/null | head -1 || true)"
+            if [[ -n "$found" ]]; then
+              echo "  找到 $found，链接到标准位置"
+              sudo mkdir -p "$ROOTFS_MOUNT/usr/lib" "$ROOTFS_MOUNT/lib"
+              sudo ln -sfn "$(realpath --relative-to="$ROOTFS_MOUNT/usr/lib" "$found" 2>/dev/null || echo "$found")" \
+                "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1" 2>/dev/null || \
+                sudo cp -a "$found" "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1"
+              # /lib 若是软链会自动可见；否则再拷一份
+              if [[ -d "$ROOTFS_MOUNT/lib" && ! -L "$ROOTFS_MOUNT/lib" ]]; then
+                sudo cp -a "$found" "$ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1" 2>/dev/null || true
+              fi
+            else
+              echo "::error::rootfs 内找不到 ld-linux-aarch64.so.1，chroot 无法运行任何动态链接程序"
+              sudo ls -la "$ROOTFS_MOUNT/usr/lib/ld-"* "$ROOTFS_MOUNT/lib/ld-"* 2>/dev/null || true
+              sudo file "$ROOTFS_MOUNT/usr/bin/bash" 2>/dev/null || true
+              exit 1
+            fi
+          fi
+
+          # 验证 bash 真的能在 chroot 里跑（而不只是 host 视角文件存在）
+          echo "--- 验证 chroot bash ---"
+          if ! sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c 'echo chroot-bash-ok'; then
+            echo "::error::chroot /usr/bin/bash 无法执行（动态链接器或依赖库仍有问题）"
+            sudo file "$ROOTFS_MOUNT/usr/bin/bash" || true
+            sudo ls -la "$ROOTFS_MOUNT/lib/ld-linux-aarch64.so.1" "$ROOTFS_MOUNT/usr/lib/ld-linux-aarch64.so.1" 2>/dev/null || true
+            # 打印 bash 需要的解释器路径
+            sudo readelf -l "$ROOTFS_MOUNT/usr/bin/bash" 2>/dev/null | grep -i interpreter || true
             exit 1
           fi
-          echo "chroot bash: /usr/bin/bash OK"
+          echo "chroot bash OK"
 
-          # ★ Host 侧解包内核模块（不依赖 chroot 内可能已坏的 tar）
+          # ★ Host 侧解包内核模块
           if [[ -f "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" ]]; then
             echo "--- host 侧解包内核模块 ---"
             sudo tar -xzf "$ROOTFS_MOUNT/tmp/kernel-modules.tar.gz" -C "$ROOTFS_MOUNT" || \
-              echo "::warning::tar 解包有警告，继续检查结果"
-            # 模块可能落在 /lib/modules，统一到 /usr/lib/modules
+              echo "::warning::tar 解包有警告，继续检查"
             if [[ -d "$ROOTFS_MOUNT/lib/modules" ]]; then
               sudo mkdir -p "$ROOTFS_MOUNT/usr/lib/modules"
               sudo cp -a "$ROOTFS_MOUNT/lib/modules"/. "$ROOTFS_MOUNT/usr/lib/modules"/ 2>/dev/null || true
             fi
-            echo "解包后 modules 目录："
+            echo "解包后 modules："
             sudo ls -la "$ROOTFS_MOUNT/usr/lib/modules" || true
             if ! sudo find "$ROOTFS_MOUNT/usr/lib/modules" -mindepth 1 -maxdepth 1 -type d -name '6.17*' | grep -q .; then
               echo "::error::未找到 6.17* 模块目录"
-              sudo find "$ROOTFS_MOUNT" -path '*/modules/6.17*' -type d 2>/dev/null | head -20 || true
               exit 1
             fi
             echo "内核模块就位 ✓"
           else
             echo "::error::未找到 kernel-modules.tar.gz"
-            sudo find inputs "$ROOTFS_MOUNT/tmp" -type f \( -name '*modules*' -o -name '*.tar.gz' \) 2>/dev/null | head -20 || true
             exit 1
           fi
 
-          # 工具链自检 + pacman 重装（用 /usr/bin/bash）
+          # 工具链自检 + 重装
           sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c '
             set +e
             echo "--- 工具自检 ---"
@@ -387,9 +426,9 @@ jobs:
               || { echo "工具链重装失败"; tail -20 /tmp/tool-fix.log || true; }
           ' || echo "::warning::chroot 工具自检/重装有异常，继续"
 
-          # Host 二进制兜底
+          # Host 二进制兜底（仅作补充；优先用 rootfs 自己的）
           echo "--- host 二进制兜底 ---"
-          for b in ln cat tee cp mv mkdir chmod chown rm ls install touch sort sed bash; do
+          for b in ln cat tee cp mv mkdir chmod chown rm ls install touch sort sed; do
             host_bin="$(command -v "$b" 2>/dev/null || true)"
             if [[ -n "$host_bin" && -x "$host_bin" ]]; then
               sudo cp -a "$host_bin" "$ROOTFS_MOUNT/usr/bin/$b" 2>/dev/null || true
@@ -397,12 +436,9 @@ jobs:
             fi
           done
 
-          # chroot 内 depmod
           sudo chroot "$ROOTFS_MOUNT" /usr/bin/bash -c '
             set +e
-            if command -v depmod >/dev/null 2>&1; then
-              depmod -a && echo "depmod -a 完成" || echo "depmod -a 失败（不阻塞）"
-            fi
+            command -v depmod >/dev/null 2>&1 && depmod -a && echo "depmod -a 完成" || echo "depmod 跳过/失败"
             echo "modules:"; ls -1 /usr/lib/modules 2>/dev/null || echo "(空)"
           ' || true
 
