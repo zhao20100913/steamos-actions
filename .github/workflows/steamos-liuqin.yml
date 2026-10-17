@@ -92,6 +92,9 @@ jobs:
   #    liuqin 的 boot.img 必须能被小米 ABL 接受：header v2 + 空 cmdline（内核读
   #    /chosen/bootargs）+ __symbols__ sink + 板级身份，见 06-make-liuqin-bootimg.sh
   # ---------------------------------------------------------------------------
+  # kernel：产物（boot.img + modules）进 Actions 缓存；第二次起命中缓存直接跳过构建，
+  #          只重跑 assemble（换 assemble 相关脚本不影响 kernel，照常命中）
+  # ---------------------------------------------------------------------------
   kernel:
     name: Build liuqin kernel + boot.img
     runs-on: ubuntu-24.04
@@ -102,7 +105,17 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Restore kernel build cache
+        id: kcache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ runner.temp }}/liuqin/out/kernel-modules.tar.gz
+            ${{ runner.temp }}/liuqin/out/boot-liuqin-steamos.img
+          key: liuqin-kernel-${{ inputs.kernel_commit }}-${{ inputs.boot_mode }}
+
       - name: Install host tools (cross build)
+        if: steps.kcache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
@@ -110,6 +123,7 @@ jobs:
             python3 git ccache kmod rsync cpio device-tree-compiler
 
       - name: Build kernel + modules
+        if: steps.kcache.outputs.cache-hit != 'true'
         run: |
           bash scripts/host/07-build-liuqin-kernel.sh \
             --work "$RUNNER_TEMP/liuqin" --jobs "$(nproc)" \
@@ -118,6 +132,7 @@ jobs:
           KERNEL_COMMIT: ${{ inputs.kernel_commit }}
 
       - name: Build boot.img (ABL-compatible)
+        if: steps.kcache.outputs.cache-hit != 'true'
         run: |
           bash scripts/host/06-make-liuqin-bootimg.sh \
             --work "$RUNNER_TEMP/liuqin" \
@@ -145,10 +160,20 @@ jobs:
           compression-level: 1
           if-no-files-found: error
 
+      - name: Save kernel build cache
+        if: steps.kcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ runner.temp }}/liuqin/out/kernel-modules.tar.gz
+            ${{ runner.temp }}/liuqin/out/boot-liuqin-steamos.img
+          key: liuqin-kernel-${{ inputs.kernel_commit }}-${{ inputs.boot_mode }}
+
   # ---------------------------------------------------------------------------
   # 2) Arch 设备包（arm64 原生 runner + ALARM chroot + makepkg）
   #    v1 只打包自包含的 C 助手；WLAN 固件/音频拓扑按输入可选参与；
   #    传感器栈、指纹栈见 packages/README.md（需另行重打包）
+  #    产物（pkgs/）同样进 Actions 缓存，第二次起命中即跳过整个构建段
   # ---------------------------------------------------------------------------
   packages:
     name: Build Arch device packages
@@ -160,16 +185,25 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Restore packages cache
+        id: pcache
+        uses: actions/cache/restore@v4
+        with:
+          path: pkgs
+          key: liuqin-pkgs
+
       - name: Clone liuqin device sources
+        if: steps.pcache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 https://github.com/yzddmr6/xiaomipad-6pro-mainline.git "$RUNNER_TEMP/liuqin-device"
 
       - name: Vendor device sources into packages
+        if: steps.pcache.outputs.cache-hit != 'true'
         run: |
           bash scripts/host/31-vendor-device-sources.sh "$RUNNER_TEMP/liuqin-device"
 
       - name: Prepare WLAN firmware (optional)
-        if: ${{ inputs.firmware_inputs_url != '' }}
+        if: ${{ inputs.firmware_inputs_url != '' && steps.pcache.outputs.cache-hit != 'true' }}
         run: |
           mkdir -p "$RUNNER_TEMP/wlan-vendor"
           curl -fsSL --retry 3 "${{ inputs.firmware_inputs_url }}" -o "$RUNNER_TEMP/wlan-vendor/vendor.tar.gz"
@@ -178,16 +212,18 @@ jobs:
             { echo "::warning::WLAN 固件重新生成失败，保持项目固定闭包"; }
 
       - name: Prepare audio topology (optional)
-        if: ${{ inputs.build_audio_topology }}
+        if: ${{ inputs.build_audio_topology && steps.pcache.outputs.cache-hit != 'true' }}
         run: |
           bash scripts/host/33-prepare-audio-topology.sh "$RUNNER_TEMP/liuqin-device" || \
             { echo "::warning::音频拓扑构建失败，跳过 liuqin-audio 包"; }
 
       - name: Prepare ALARM chroot
+        if: steps.pcache.outputs.cache-hit != 'true'
         run: |
           sudo bash scripts/host/20-alarm-chroot.sh /mnt/alarm
 
       - name: Build packages
+        if: steps.pcache.outputs.cache-hit != 'true'
         run: |
           sudo bash scripts/host/21-build-pkg.sh /mnt/alarm packages pkgs
 
@@ -198,6 +234,13 @@ jobs:
           path: pkgs
           retention-days: 14
           if-no-files-found: error
+
+      - name: Save packages cache
+        if: steps.pcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: pkgs
+          key: liuqin-pkgs
 
   # ---------------------------------------------------------------------------
   # 3) 组装 rootfs.img（Frame 用户空间 + liuqin 内核模块 + 设备包）
@@ -278,6 +321,22 @@ jobs:
             -exec mv {} "$ROOTFS_MOUNT/tmp/boot.img" \;
           sudo cp scripts/in-chroot/10-graft-liuqin.sh "$ROOTFS_MOUNT/root/graft/"
           sudo chmod +x "$ROOTFS_MOUNT/root/graft/10-graft-liuqin.sh"
+          # 工具链自检：rsync 铺层后偶发部分 /usr/bin 工具（sed/tail/depmod…）断链或缺失，
+          #   chroot 内执行会报 "cannot execute: required file not found"（exit 127）。
+          #   用 pacman 强制重装修复（chroot 内 pacman 可用且能联网，见上面 zenity 装包）。
+          sudo chroot "$ROOTFS_MOUNT" /bin/bash -c '
+            echo "--- 工具自检 ---"
+            for t in sed tail depmod tar find sort; do
+              p="$(command -v "$t" 2>/dev/null || true)"
+              if [[ -n "$p" ]] && [[ -x "$p" ]]; then echo "OK   $t -> $p"; else echo "MISSING $t"; fi
+            done
+            echo "--- pacman 强制重装修复工具链 ---"
+            if pacman -S --noconfirm --force sed coreutils kmod tar >/tmp/tool-fix.log 2>&1; then
+              echo "工具链重装完成"
+            else
+              echo "工具链重装失败（构建继续，depmod 可能不可用）"
+            fi
+          ' || echo "::warning::chroot 工具自检/修复异常，继续构建"
           sudo chroot "$ROOTFS_MOUNT" /bin/bash -c \
             "PARTLABEL='${{ steps.parse.outputs.label }}' \
              WIFI_SSID='${{ inputs.wifi_ssid }}' WIFI_PSK='${{ inputs.wifi_password }}' \
