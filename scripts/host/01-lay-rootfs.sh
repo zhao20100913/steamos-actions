@@ -50,11 +50,30 @@ truncate -s "${use_mb}M" "$IMG"
 mkfs.ext4 -q -F -L rootfs "$IMG" || die "mkfs.ext4 失败"
 
 # 4) 铺层：整棵 btrfs 顶层树（含各子卷内容）rsync 进 ext4
+#    ⚠️ 底包是 btrfs，每个文件/目录都带 `btrfs.compression` 这类**专有 xattr**，
+#       拷到 ext4 上必然 lsetxattr EOPNOTSUPP(95)，rsync 于是以 rc=23 结束。
+#       内容其实都已拷完，所以这里只容忍「xattr Operation not supported」，
+#       其它错误（如磁盘满 ENOSPC）照样失败。方案经 ref-steamos-sheng 实跑验证。
 mount -o loop "$IMG" "$MOUNT_DST" || die "挂载目标镜像失败"
-log "开始 rsync（btrfs 子卷只读属性自动忽略）..."
-rsync -aHAX --info=progress2 \
+log "开始 rsync（btrfs 专有 xattr 在 ext4 上会报 EOPNOTSUPP，无害，自动容忍）..."
+RSYNC_LOG=/tmp/lay-rsync.log
+set +e
+rsync -aHAX --numeric-ids --info=progress2 \
   --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/run --exclude=/tmp \
-  "$MOUNT_SRC/" "$MOUNT_DST/" || die "rsync 失败"
+  "$MOUNT_SRC/" "$MOUNT_DST/" 2>"$RSYNC_LOG"
+rc="$?"
+set -e
+if [[ "$rc" -ne 0 ]]; then
+  others="$(grep -E '^rsync:' "$RSYNC_LOG" 2>/dev/null \
+    | grep -vE 'lsetxattr\(.*\) failed: Operation not supported' | head -10 || true)"
+  if [[ -n "$others" ]]; then
+    printf '%s\n' "$others" | sed 's/^/    /' >&2
+    tail -20 "$RSYNC_LOG" | sed 's/^/    /' >&2
+    die "rsync 失败（rc=$rc）：见上面的错误"
+  fi
+  dropped="$(grep -cE 'lsetxattr\(.*\) failed: Operation not supported' "$RSYNC_LOG" 2>/dev/null || echo 0)"
+  log "rsync rc=$rc：仅丢失 $dropped 个 btrfs 专有 xattr（ext4 不支持，无害），内容已拷完，继续"
+fi
 sync
 umount "$MOUNT_DST" || die "卸载目标失败"
 log "铺层完成"
