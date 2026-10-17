@@ -88,24 +88,29 @@ else
     || warn "zenity 装不上，电源菜单可能不可用（电源键长短按仍由 daemon 处理）"
 fi
 
-# 3.5) 内核模块：优先使用 workflow 在 host 侧已解好的模块；若目录为空再尝试 chroot 内解包
+# 3.5) 内核模块：优先使用 workflow 在 host 侧已解好的模块
 KMT="${KERNEL_MODULES_TAR:-/tmp/kernel-modules.tar.gz}"
 if find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
-  log "内核模块目录已存在（由 host 侧预解包），跳过 tar"
+  log "内核模块目录已存在（host 侧预解包），跳过 tar"
 else
   if [[ -s "$KMT" ]]; then
     tar -xzf "$KMT" -C / 2>/dev/null && log "chroot 内解包内核模块完成" \
-      || warn "内核模块解包失败（若 host 侧也未解成功，verify 会报错）"
+      || warn "内核模块解包失败"
+    # 若落到 /lib/modules，同步到 /usr/lib/modules
+    if [[ -d /lib/modules ]]; then
+      mkdir -p /usr/lib/modules 2>/dev/null || true
+      cp -a /lib/modules/. /usr/lib/modules/ 2>/dev/null || true
+    fi
   else
-    warn "缺少 $KMT 且 /usr/lib/modules 为空 —— 模块没装"
+    warn "缺少 $KMT 且 /usr/lib/modules 为空"
   fi
 fi
 if depmod -a >/tmp/liuqin-depmod.log 2>&1; then
   KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | tail -1)"
   log "depmod -a 完成；最高版本目录: ${KVER:-无}"
 else
-  warn "depmod -a 失败（不阻塞构建）"
-  tail -10 /tmp/liuqin-depmod.log 2>/dev/null | while read -r l; do printf '    %s\n' "$l"; done 2>/dev/null || true
+  warn "depmod -a 失败（不阻塞）"
+  tail -10 /tmp/liuqin-depmod.log 2>/dev/null || true
 fi
 KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | tail -1 || true)"
 
