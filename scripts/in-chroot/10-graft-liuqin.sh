@@ -87,45 +87,47 @@ else
     || warn "zenity 装不上，电源菜单可能不可用（电源键长短按仍由 daemon 处理）"
 fi
 
-# 3.4) pacman -U --overwrite '*' 之后 coreutils/glibc 经常再次不可执行
-#      （cat/tee/ln/cp 等报 "cannot execute: required file not found"）。
-#      这里再强制重装一次核心工具，并做可执行性检查。
+# 3.4) pacman -U --overwrite '*' 之后 coreutils 经常再次不可执行。
+#      再强制重装一次，并定义安全的 mkdir/ln 兜底函数，后续尽量不因外部命令挂掉。
 log "pacman -U 后再次修复核心工具链..."
 pacman -S --noconfirm --overwrite "*" \
   coreutils bash glibc filesystem sed kmod tar findutils util-linux \
   >/tmp/tool-fix2.log 2>&1 \
   && log "核心工具链二次修复完成" \
-  || warn "核心工具链二次修复失败（继续尝试；日志见 /tmp/tool-fix2.log）"
+  || warn "核心工具链二次修复失败（继续；日志见 /tmp/tool-fix2.log）"
 
-# 二次确认关键命令是否真的能跑；不行就告警（后续尽量走 bash 内建兜底）
-for t in ln cat cp mv; do
-  if command -v "$t" >/dev/null 2>&1 && "$t" --version >/dev/null 2>&1; then
-    log "  ✓ $t 可用"
-  else
-    warn "  ✗ $t 仍不可用（后续相关步骤会尽量兜底）"
+# 安全目录创建：优先 install -d，失败则用 mkdir -p
+safe_mkdir() {
+  if command -v install >/dev/null 2>&1 && install -d "$@" 2>/dev/null; then
+    return 0
   fi
-done
+  local d
+  for d in "$@"; do
+    mkdir -p "$d" 2>/dev/null || true
+  done
+}
+
+# 安全软链：优先 ln -sf，失败则跳过（不中断脚本）
+safe_ln() {
+  ln -sf "$@" 2>/dev/null || true
+}
 
 # 3.5) 内核模块：把 boot.img 同批构建的模块树解进 /
 KMT="${KERNEL_MODULES_TAR:-/tmp/kernel-modules.tar.gz}"
 if [[ -s "$KMT" ]]; then
   tar -xzf "$KMT" -C / 2>/dev/null || warn "内核模块解包失败"
-  # depmod -a 处理所有版本目录（Frame 残留目录一并重建索引，避免选错版本）
   if depmod -a >/tmp/liuqin-depmod.log 2>&1; then
     KVER="$(find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -printf '%f\n' 2>/dev/null | sort -V | tail -1)"
     log "depmod -a 完成；最高版本目录: ${KVER:-无}"
   else
-    warn "depmod -a 失败（不阻塞构建；日志尾部见下，若提示工具缺失请确认 workflow 已跑工具链自检/重装）"
+    warn "depmod -a 失败（不阻塞构建；日志尾部见下）"
     tail -10 /tmp/liuqin-depmod.log 2>/dev/null | sed 's/^/    /' 2>/dev/null || true
   fi
 else
   warn "缺少 $KMT —— 模块没装，depmod 跳过"
 fi
 
-# 4) fstab：根分区用 PARTLABEL（与 boot.img 的 cmdline root=PARTLABEL=<label> 一致）
-#    ⚠️ 不要照抄 sheng 写死的 /dev/sda30：liuqin 的 UFS 盘号/分区号不保证一致。
-#    独立的 home 分区（PARTLABEL=home）可选：有就挂、没有 nofail 照常启动（/home 留在 root 里）。
-#    完全用 bash 内建写文件，不调用外部 cat/tee。
+# 4) fstab：完全用 bash 内建，不调用外部 cat/tee
 {
   printf '%s\n' \
     '# 由 10-graft-liuqin.sh 生成（SteamOS for liuqin）' \
@@ -136,15 +138,13 @@ fi
 } > /etc/fstab
 log "已写 /etc/fstab（root=PARTLABEL=$PARTLABEL，home 可选）"
 
-# 5) 基本系统配置
-#    ln 在此环境可能再次不可执行，做兜底：先试 ln，失败则用 cp，再失败就跳过。
+# 5) 基本系统配置（时区做多重兜底）
 if [[ -e /usr/share/zoneinfo/Asia/Shanghai ]]; then
   if ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null; then
     log "时区已用 ln 链接到 Asia/Shanghai"
   elif command -v cp >/dev/null 2>&1 && cp -a /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null; then
     log "时区已用 cp 复制到 /etc/localtime"
   else
-    # 最后兜底：只写 /etc/timezone，让后续 localed/systemd 处理
     printf 'Asia/Shanghai\n' > /etc/timezone 2>/dev/null || true
     warn "ln/cp 都不可用，仅写入 /etc/timezone"
   fi
@@ -155,9 +155,8 @@ fi
 locale-gen >/dev/null 2>&1 || true
 log "时区/locale 已配置"
 
-# 5.5) /var 骨架：Frame 的 /var 可能在独立子卷（var-A）里，若没并进来就是空的。
-#      systemd 首启会用 tmpfiles 补一部分，但 pacman 数据库、DBus、日志目录得先在。
-install -d /var/lib/pacman /var/lib/dbus /var/log/journal /var/lib/systemd
+# 5.5) /var 骨架（用 safe_mkdir，避免 install 不可执行导致 exit 127）
+safe_mkdir /var/lib/pacman /var/lib/dbus /var/log/journal /var/lib/systemd
 log "/var 骨架已补齐（pacman/dbus/systemd/log 目录）"
 
 # 5.9) 停掉「按 Frame 分区表挂载」的单元 + GPT 自动挂载生成器
